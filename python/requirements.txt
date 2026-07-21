@@ -1,0 +1,10 @@
+# Pin exact versions — the MCP SDK ecosystem has had at least one supply-chain
+# incident in 2026 (STDIO command-injection flaw across official SDKs). Never
+# install with `mcp@latest` in a real deployment; bump this deliberately.
+mcp==1.28.1
+
+# The streamable-HTTP transport (Phase 7, http_transport.py — optional, only used
+# if UNITY_MCP_TRANSPORT=http) needs uvicorn and httpx. Both already come in
+# transitively as mcp's own dependencies at this pinned version — nothing extra to
+# install. If you ever unpin mcp, re-check this: a future mcp release dropping one
+# of these as a dependency would need it added here explicitly.

@@ -8,7 +8,7 @@ namespace UnityMCP.Tools
 {
     public static class CompilationTools
     {
-        [MCPTool("get_compilation_errors", "Returns C# compiler errors and warnings from the last compile, read directly from CompilationPipeline. Unlike console-based tools, this is unaffected by Console clears or log buffer overflow — use it to check whether a script change actually compiled cleanly.", group: "scripting")]
+        [MCPTool("get_compilation_errors", "Returns C# compiler errors and warnings from the last compile, read directly from CompilationPipeline. Unlike console-based tools, this is unaffected by Console clears or log buffer overflow — use it to check whether a script change actually compiled cleanly.", group: "scripting", readOnly: true)]
         public static MCPResult GetCompilationErrors(
             MCPToolContext ctx,
             [MCPParam("Filter by severity: \"error\", \"warning\", or \"all\". Defaults to \"all\".")] string severity = "all",

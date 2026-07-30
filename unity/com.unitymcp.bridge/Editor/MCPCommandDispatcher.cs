@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using Newtonsoft.Json;
+using UnityMCP.Groups;
 using UnityMCP.Protocol;
 using UnityMCP.Security;
 
@@ -68,14 +69,22 @@ namespace UnityMCP
         {
             MCPToolRegistry.EnsureScanned();
 
-            var tools = MCPToolRegistry.Tools.Values.Select(t => new MCPToolDescriptor
-            {
-                name = t.Name,
-                description = t.Description,
-                latency_tier = t.LatencyTier == MCPLatencyTier.Slow ? "slow" : "fast",
-                group = t.Group,
-                schema = t.Schema
-            }).ToList();
+            // A disabled group's tools never appear here at all -- not just "inactive"
+            // (Python's groups.py-level activation), an actual hard exclusion so a
+            // client can't discover the tool exists in the first place. See
+            // MCPToolRegistry.Invoke for the matching refusal on a direct-by-name call.
+            var tools = MCPToolRegistry.Tools.Values
+                .Where(t => !MCPToolGroupConfig.IsDisabled(t.Group))
+                .Select(t => new MCPToolDescriptor
+                {
+                    name = t.Name,
+                    description = t.Description,
+                    latency_tier = t.LatencyTier == MCPLatencyTier.Slow ? "slow" : "fast",
+                    group = t.Group,
+                    schema = t.Schema,
+                    destructive = t.Destructive,
+                    read_only = t.ReadOnly
+                }).ToList();
 
             return new MCPMessage { type = "tools_list", id = msg.id, tools = tools };
         }

@@ -91,7 +91,7 @@ async def main():
             degraded = await client.list_tools()
             degraded_names = {t.name for t in degraded.tools}
             assert "create_gameobject" not in degraded_names, degraded_names
-            assert degraded_names == {"batch_execute", "manage_tools"}, degraded_names
+            assert degraded_names == {"batch_execute", "manage_tools", "align_gameobjects", "snap_to_ground"}, degraded_names
             print(f"[PASS] while genuinely disconnected, only core-group workflow tools remain visible (expected): {degraded_names}")
 
             # --- 4. Simulate Unity coming back on a DIFFERENT port with a fresh session.json

@@ -116,7 +116,7 @@ namespace UnityMCP.Tools
             "list_scripts",
             "Lists C# script paths (relative to Assets/) under an optional subfolder filter. Omit underPath to list every " +
             "script in the project.",
-            group: "scripting")]
+            group: "scripting", readOnly: true)]
         public static MCPResult ListScripts(
             MCPToolContext ctx,
             [MCPParam("Subfolder under Assets/ to search, e.g. 'Scripts/Enemies'. Omit to search the whole project.")] string underPath = null)
@@ -151,7 +151,7 @@ namespace UnityMCP.Tools
             "Returns whether the Editor is currently compiling scripts, plus structured errors/warnings from the most recent " +
             "compilation. Poll this after create_script/update_script/delete_script before relying on the change having taken " +
             "effect.",
-            group: "scripting")]
+            group: "scripting", readOnly: true)]
         public static MCPResult GetCompileStatus(MCPToolContext ctx)
         {
             var messages = MCPCompileStatus.GetMessages();
@@ -167,6 +167,32 @@ namespace UnityMCP.Tools
                 errors,
                 warnings,
                 lastCompileFinishedAt = lastFinished == DateTime.MinValue ? null : lastFinished.ToString("o")
+            });
+        }
+
+        [MCPTool(
+            "resolve_type",
+            "Resolves a type name (short or fully-qualified) to its full name, declaring assembly, and base type -- use " +
+            "before add_component/set_component_field/create_scriptable_object when a short type name might be ambiguous " +
+            "(e.g. your own class sharing a name with a package's), or just to confirm a type exists and what it derives " +
+            "from before wiring it up.",
+            group: "scripting")]
+        public static MCPResult ResolveType(
+            MCPToolContext ctx,
+            [MCPParam("Type name to resolve, e.g. 'Rigidbody' or 'MyNamespace.Enemy'.")] string typeName)
+        {
+            if (!MCPTypeResolver.TryResolve(typeName, out var type, out var error))
+                return MCPResult.Fail(error);
+
+            return MCPResult.Success(new
+            {
+                fullName = type.FullName,
+                assemblyName = type.Assembly.GetName().Name,
+                baseType = type.BaseType?.FullName,
+                isMonoBehaviour = typeof(UnityEngine.MonoBehaviour).IsAssignableFrom(type),
+                isScriptableObject = typeof(UnityEngine.ScriptableObject).IsAssignableFrom(type),
+                isComponent = typeof(UnityEngine.Component).IsAssignableFrom(type),
+                isEnum = type.IsEnum
             });
         }
 

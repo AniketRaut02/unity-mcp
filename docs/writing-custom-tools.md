@@ -222,28 +222,19 @@ an actual Unity Editor.
       guard-clause test in `RegistryTests.cs`
 - [ ] `bash dev-tests/csharp/run_tests.sh` passes
 
-## §11. When you don't need to write any code at all: the visual Tool Builder
+## §11. Composite tools: chaining existing tools without new Unity-side logic
 
 Everything above is for a genuinely new *atomic* tool — one that does
 something no existing tool does, usually by calling a Unity API directly.
 But a lot of what you'll want is really a **composite** tool: an existing
 sequence of atomic tools you find yourself asking an agent to chain
 together repeatedly ("create a GameObject, add a collider, set its
-position..."). For that, `Window → Unity MCP → Tool Builder` skips C#
-entirely.
+position..."). For that, write a Python `@workflow`-decorated function
+directly in `python/unity_mcp_server/custom_workflows.py` — the exact same
+mechanism `batch_execute` and `create_behavior_tree` are built on (see
+`workflows.py` for the pattern). No restart of Unity needed; just reconnect
+your MCP client session to pick up the new tool.
 
-Pick a chain of existing tools, wire each step's arguments (a literal value,
-`{paramName}` to reference one of your new tool's own parameters, or
-`{stepN.field}` to reference a field from an earlier step's result), name it,
-and click Generate. It writes a real Python `@workflow`-decorated function
-into `custom_workflows.py` — the exact same mechanism `batch_execute` and
-`create_behavior_tree` are built on (see `workflows.py`). No restart of Unity
-needed; just reconnect your MCP client session to pick up the new tool.
-
-This is genuinely the same pattern as §1's `spawn_coin` walkthrough, just
-composing *existing* tools instead of writing new Unity API calls — if what
-you need is "chain some tools together," reach for the Tool Builder first;
-if you need new Unity-side logic no existing tool has, write a `[MCPTool]`
-method as described above. `custom_workflows.py` is yours from the moment
-it's generated — the builder only ever appends, it never rewrites a function
-you've since hand-edited.
+If what you need is "chain some tools together," write a composite tool in
+Python; if you need new Unity-side logic no existing tool has, write a
+`[MCPTool]` method as described above.

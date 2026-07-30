@@ -25,10 +25,13 @@ pip install -r requirements.txt
 
 1. Open your Unity project. The MCP bridge starts automatically — check the
    Console for `[MCP] Listening on 127.0.0.1:<port>`.
-2. Open `Window → Unity MCP → Setup`. Set your Python server's location if
-   using the Tool Builder, then click **Configure** next to Claude Code or
-   Codex (whichever you use) to register the server automatically — no
-   terminal commands needed.
+2. Open `Window → Unity MCP → Setup`. Set the Python server location (the
+   folder containing `workflows.py` and `server.py`), then click **Configure**
+   next to Claude Code, Codex, Cursor, or Antigravity (whichever you use) to
+   register the server automatically — no terminal commands needed. The
+   window shows which client was configured most recently and color-codes
+   each section (green = good/configured, yellow = needs attention, red =
+   blocked) so the state is visible at a glance.
 3. Restart your MCP client session. Ask it to do something in Unity — "create
    a red cube at the origin" is a good first test.
 
@@ -48,13 +51,16 @@ by default — everything else is toggled on with the `manage_tools` tool
 (`activate`/`deactivate`/`list_groups`) to keep your assistant's context
 focused. Ask it "what tool groups are available?" to see the full list.
 
-## Two ways to add your own tools
+## Adding your own tools
 
-1. **No code** — `Window → Unity MCP → Tool Builder`. Chain existing tools
-   together in a form; it generates a real Python tool for you.
-2. **C#** — see `docs/writing-custom-tools.md` in this package for the full
-   guide. A new tool is a `[MCPTool]`-decorated static method; nothing else
-   to register.
+- **New Unity-side behavior** — write a `[MCPTool]`-decorated static method in
+  C#; nothing else to register. See `docs/writing-custom-tools.md` for the
+  full guide.
+- **Chaining existing tools** — write a Python `@workflow`-decorated composite
+  tool directly in `python/unity_mcp_server/custom_workflows.py`, following
+  the pattern of the built-ins in `workflows.py` (`batch_execute`,
+  `create_behavior_tree`, ...). No Unity restart needed, just reconnect your
+  MCP client session.
 
 ## Transports
 

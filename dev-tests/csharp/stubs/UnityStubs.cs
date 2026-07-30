@@ -92,8 +92,10 @@ namespace UnityEngine
     {
         public float r, g, b, a;
         public Color(float r, float g, float b, float a) { this.r = r; this.g = g; this.b = b; this.a = a; }
+        public Color(float r, float g, float b) : this(r, g, b, 1f) {}
         public static Color black => new Color(0f, 0f, 0f, 1f);
         public static Color white => new Color(1f, 1f, 1f, 1f);
+        public static Color gray => new Color(0.5f, 0.5f, 0.5f, 1f);
     }
 
     public enum TextAnchor { UpperLeft, UpperCenter, UpperRight, MiddleLeft, MiddleCenter, MiddleRight, LowerLeft, LowerCenter, LowerRight }
@@ -321,6 +323,24 @@ namespace UnityEditor
         public static void RaiseHierarchyChangedForTest() => hierarchyChanged?.Invoke();
     }
 
+    // Minimal stand-in for real Unity's per-Editor-session key/value store, which
+    // survives domain reloads (but not Editor restarts) -- exactly the property
+    // MCPServer relies on to remember "did a client have an authenticated
+    // connection open right before the last Stop()" across the domain reload that
+    // wipes every plain static field. A Dictionary is enough here since this stub
+    // process never actually reloads a domain -- it just needs to hold whatever
+    // was last set, the same way real SessionState would across a reload.
+    public static class SessionState
+    {
+        private static readonly System.Collections.Generic.Dictionary<string, bool> _bools =
+            new System.Collections.Generic.Dictionary<string, bool>();
+
+        public static void SetBool(string key, bool value) => _bools[key] = value;
+
+        public static bool GetBool(string key, bool defaultValue) =>
+            _bools.TryGetValue(key, out var value) ? value : defaultValue;
+    }
+
     // Real Unity API (2021.1+) — see MCPHierarchyCache.cs for why this is used alongside
     // hierarchyChanged rather than instead of it.
     public struct ObjectChangeEventStream
@@ -459,6 +479,8 @@ namespace UnityEditor
     public static class GUI
     {
         public static GUISkin skin = new GUISkin();
+        public static UnityEngine.Color backgroundColor = UnityEngine.Color.white;
+        public static UnityEngine.Color color = UnityEngine.Color.white;
     }
 
     public class GUILayoutOption {}
@@ -482,6 +504,7 @@ namespace UnityEditor
         public static void BeginVertical(GUIStyle style, params GUILayoutOption[] options) {}
         public static void EndVertical() {}
         public static void Space(float pixels) {}
+        public static void FlexibleSpace() {}
         public static GUILayoutOption Width(float width) => new GUILayoutOption();
         public static GUILayoutOption Height(float height) => new GUILayoutOption();
     }
@@ -533,5 +556,19 @@ namespace Newtonsoft.Json
         public static string SerializeObject(object o) => "{}";
         public static string SerializeObject(object o, Formatting f) => "{}";
         public static T DeserializeObject<T>(string json) => default(T);
+    }
+}
+
+namespace Newtonsoft.Json.Linq
+{
+    // Minimal stand-in for the real JArray: enough to exercise
+    // MCPToolRegistry.ConvertArg's IEnumerable-based string[] coercion against the
+    // ACTUAL type Newtonsoft produces on the wire (deserializing a JSON array into a
+    // Dictionary<string, object>-typed slot yields JArray, not List<object>) --
+    // without needing the real Newtonsoft.Json.Linq assembly in this stub harness.
+    public class JArray : System.Collections.Generic.List<object>
+    {
+        public JArray() {}
+        public JArray(params object[] items) : base(items) {}
     }
 }

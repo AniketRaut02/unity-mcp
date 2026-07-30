@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
+using UnityMCP.Groups;
 
 namespace UnityMCP
 {
@@ -12,6 +13,7 @@ namespace UnityMCP
         public string Description;
         public MCPLatencyTier LatencyTier;
         public bool Destructive;
+        public bool ReadOnly;
         public string Group;
         public MethodInfo Method;
         public ParameterInfo[] Parameters;
@@ -85,6 +87,7 @@ namespace UnityMCP
                             Description = attr.Description,
                             LatencyTier = attr.LatencyTier,
                             Destructive = attr.Destructive,
+                            ReadOnly = attr.ReadOnly,
                             Group = attr.Group,
                             Method = method,
                             Parameters = parameters,
@@ -124,18 +127,35 @@ namespace UnityMCP
 
                 var underlyingType = Nullable.GetUnderlyingType(p.ParameterType) ?? p.ParameterType;
 
-                var propertySchema = new Dictionary<string, object>
+                Dictionary<string, object> propertySchema;
+                if (underlyingType == typeof(string[]))
                 {
-                    ["type"] = MapJsonType(p.ParameterType)
-                };
+                    // A JSON array of strings, not a bare type -- string[] is the one
+                    // list-shaped parameter type the registry supports (tags, references,
+                    // bindings, inventories, ... -- overwhelmingly the common "list of
+                    // things" need across tools), coerced from the wire's JArray in
+                    // ConvertArg below.
+                    propertySchema = new Dictionary<string, object>
+                    {
+                        ["type"] = "array",
+                        ["items"] = new Dictionary<string, object> { ["type"] = "string" }
+                    };
+                }
+                else
+                {
+                    propertySchema = new Dictionary<string, object>
+                    {
+                        ["type"] = MapJsonType(p.ParameterType)
+                    };
 
-                // Enum-typed parameters get an explicit "enum" list of valid string
-                // values, rather than making the caller guess them from prose in the
-                // tool description — this is what lets an agent (or a schema-validating
-                // client) know the exact valid set instead of pattern-matching examples.
-                if (underlyingType.IsEnum)
-                {
-                    propertySchema["enum"] = Enum.GetNames(underlyingType);
+                    // Enum-typed parameters get an explicit "enum" list of valid string
+                    // values, rather than making the caller guess them from prose in the
+                    // tool description — this is what lets an agent (or a schema-validating
+                    // client) know the exact valid set instead of pattern-matching examples.
+                    if (underlyingType.IsEnum)
+                    {
+                        propertySchema["enum"] = Enum.GetNames(underlyingType);
+                    }
                 }
 
                 var paramAttr = p.GetCustomAttribute<MCPParamAttribute>();
@@ -201,6 +221,23 @@ namespace UnityMCP
             if (!_tools.TryGetValue(name, out var entry))
                 return MCPResult.Fail($"Unknown tool '{name}'.");
 
+            // A disabled group (set via Window > Unity MCP > Tool Groups, a human-only
+            // control -- there is no MCP tool that can disable/re-enable a group) is
+            // refused with the exact same message a genuinely unknown tool gets, not a
+            // distinct "disabled" error -- an MCP client must not be able to infer the
+            // group's existence from the error text, matching how list_tools already
+            // never advertises it (see MCPCommandDispatcher.HandleListTools) and how
+            // Python's groups.py treats it the same way for its own composite tools.
+            if (MCPToolGroupConfig.IsDisabled(entry.Group))
+                return MCPResult.Fail($"Unknown tool '{name}'.");
+
+            // Read-Only Mode (Window > Unity MCP > Tool Groups, human-only toggle): unlike
+            // a disabled group, this isn't about hiding a tool's existence -- it's a
+            // deliberate "look but don't touch" posture, so the refusal says exactly why
+            // instead of pretending the tool doesn't exist.
+            if (MCPToolGroupConfig.IsReadOnlyMode() && !entry.ReadOnly)
+                return MCPResult.Fail($"Tool '{name}' is not read-only, and Read-Only Mode is enabled for this project.");
+
             try
             {
                 if (entry.Destructive)
@@ -264,6 +301,19 @@ namespace UnityMCP
 
             if (underlying.IsInstanceOfType(raw)) return raw;
             if (underlying.IsEnum) return Enum.Parse(underlying, raw.ToString());
+
+            // A JSON array arrives here as Newtonsoft's JArray (deserializing into the
+            // Dictionary<string, object>-typed args field keeps nested arrays/objects as
+            // JArray/JObject, not plain List<object>/Dictionary<string, object>) -- but
+            // this is written against the general IEnumerable contract, not JArray
+            // specifically, so it also accepts a real string[]/object[]/List<object> a
+            // direct (non-wire) caller -- e.g. a dev-test -- might pass instead.
+            if (underlying == typeof(string[]) && raw is System.Collections.IEnumerable enumerable && !(raw is string))
+            {
+                var items = new List<string>();
+                foreach (var item in enumerable) items.Add(item?.ToString());
+                return items.ToArray();
+            }
 
             if (underlying == typeof(int)) return Convert.ToInt32(raw);
             if (underlying == typeof(long)) return Convert.ToInt64(raw);

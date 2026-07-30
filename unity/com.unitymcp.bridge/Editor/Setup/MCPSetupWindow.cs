@@ -1,16 +1,18 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEngine;
 using UnityMCP.Security;
-using UnityMCP.ToolBuilder;
 
 namespace UnityMCP.Setup
 {
     /// <summary>
     /// Window -> Unity MCP -> Setup. Live bridge status, multi-instance conflict
-    /// detection, and one-click client configuration for four clients (Claude Code,
-    /// Codex, Cursor, Antigravity).
+    /// detection, the Python server location, and one-click client configuration for
+    /// four clients (Claude Code, Codex, Cursor, Antigravity) — the single home for
+    /// every piece of Editor-side MCP configuration now that the visual Tool Builder
+    /// (which used to own the Python server location setting) has been removed.
     ///
     /// Configure writes each client's config file directly (.mcp.json, .codex/config.toml,
     /// etc.) rather than shelling out to a CLI (claude mcp add / codex mcp add) —
@@ -35,7 +37,7 @@ namespace UnityMCP.Setup
         {
             var window = GetWindow<MCPSetupWindow>();
             window.titleContent = new GUIContent("Unity MCP Setup");
-            window.minSize = new Vector2(460, 480);
+            window.minSize = new Vector2(460, 560);
         }
 
         private string _statusMessage = "";
@@ -44,6 +46,21 @@ namespace UnityMCP.Setup
         private const double ConflictCheckIntervalSeconds = 2.0;
         private double _lastConflictCheckTime = -1;
         private MCPInstanceConflictInfo _conflictInfo;
+
+        // Whether each client's config file currently has this project's server entry
+        // in it -- refreshed on the same throttle as the conflict check (cheap, but no
+        // reason to hit disk for four files on every single repaint).
+        private double _lastClientStatusCheckTime = -1;
+        private readonly Dictionary<MCPClientKind, bool> _configuredCache = new Dictionary<MCPClientKind, bool>();
+
+        // Soft, theme-agnostic tints applied via GUI.backgroundColor around a
+        // GUI.skin.box — multiplies with the skin's own neutral gray box texture, so
+        // these read as pastel accents rather than solid color blocks in both the
+        // light and dark Editor skins.
+        private static readonly Color ColorGood = new Color(0.72f, 0.92f, 0.72f);
+        private static readonly Color ColorBad = new Color(0.95f, 0.68f, 0.68f);
+        private static readonly Color ColorWarn = new Color(0.97f, 0.90f, 0.55f);
+        private static readonly Color ColorNeutral = Color.white;
 
         private void OnEnable()
         {
@@ -62,9 +79,15 @@ namespace UnityMCP.Setup
 
         private void OnGUI()
         {
+            RefreshClientConfiguredStatusIfDue();
+
             DrawBridgeStatus();
             GUILayout.Space(8);
             DrawConflictStatus();
+            GUILayout.Space(8);
+            DrawPythonServerSection();
+            GUILayout.Space(8);
+            DrawLastConfiguredSection();
             GUILayout.Space(12);
 
             foreach (var kind in MCPClientDetector.AllKinds())
@@ -80,7 +103,27 @@ namespace UnityMCP.Setup
             }
         }
 
+        /// <summary>Tints the background of a GUI.skin.box for the duration of `drawContent` -- the one real trick IMGUI offers for a colored panel that still looks native in both the light and dark Editor skins.</summary>
+        private static void DrawColoredBox(Color tint, Action drawContent)
+        {
+            var previous = GUI.backgroundColor;
+            GUI.backgroundColor = tint;
+            GUILayout.BeginVertical(GUI.skin.box);
+            GUI.backgroundColor = previous; // reset immediately so child controls (buttons, fields) aren't also tinted
+            drawContent();
+            GUILayout.EndVertical();
+        }
+
         private void DrawBridgeStatus()
+        {
+            var tint = MCPServer.BoundPort > 0
+                ? ColorGood
+                : MCPServer.LastStartBlockedByInstanceLock ? ColorBad : ColorNeutral;
+
+            DrawColoredBox(tint, DrawBridgeStatusContent);
+        }
+
+        private void DrawBridgeStatusContent()
         {
             GUILayout.Label("Bridge Status", EditorStyles.boldLabel);
 
@@ -88,10 +131,55 @@ namespace UnityMCP.Setup
             {
                 GUILayout.Label($"\u25CF Running on port {MCPServer.BoundPort}");
                 GUILayout.Label($"Connected clients: {MCPServer.ConnectedClientCount}");
+
+                // Distinguishes "0 clients because a domain reload just cycled the
+                // bridge (very likely from entering/exiting Play Mode -- Unity does
+                // this by default on every transition unless Enter Play Mode Options
+                // has domain reload disabled) and a reconnect just hasn't happened
+                // yet" from "0 clients because nobody has ever connected" or "0
+                // clients and something is actually wrong". Without this, both looked
+                // identical in this window, with nothing here to explain why a client
+                // that was working a second ago now reads as disconnected even though
+                // the AI tool itself never saw an interruption (it talks to the
+                // long-lived Python process, not directly to this socket) and will
+                // reconnect transparently on its own next tool call.
+                if (MCPServer.ConnectedClientCount == 0 && MCPServer.HadClientBeforeLastRestart && MCPServer.SecondsSinceStart < 20)
+                {
+                    EditorGUILayout.HelpBox(
+                        "0 clients right now, but one WAS connected just before this restart -- most likely a " +
+                        "Play Mode transition or script recompile triggered a domain reload, which always drops " +
+                        "the bridge's live socket connections. This is expected, not an error: any MCP client " +
+                        "(Claude Code, Codex, etc.) reconnects automatically the next time it calls a tool, using " +
+                        "the fresh session.json this restart just wrote.",
+                        MessageType.Info);
+                }
+            }
+            else if (MCPServer.LastStartBlockedByInstanceLock)
+            {
+                EditorGUILayout.HelpBox(
+                    "Not running -- another live Unity process already owns the MCP bridge for this " +
+                    "project (see the Console for details). This instance deliberately did not start a " +
+                    "second bridge to avoid silently fighting the other one over session.json. Close the " +
+                    "other Unity instance for this project, then click Retry.",
+                    MessageType.Error);
+
+                if (GUILayout.Button("Retry", GUILayout.Width(80)))
+                {
+                    MCPServer.Start();
+                    RefreshConflictStatus();
+                    Repaint();
+                }
             }
             else
             {
                 GUILayout.Label("\u25CB Not running — check the Console for a bind error.");
+
+                if (GUILayout.Button("Retry", GUILayout.Width(80)))
+                {
+                    MCPServer.Start();
+                    RefreshConflictStatus();
+                    Repaint();
+                }
             }
 
             GUILayout.Label($"Project: {MCPProjectUtil.ProjectRoot}");
@@ -117,6 +205,12 @@ namespace UnityMCP.Setup
 
             if (_conflictInfo == null) return;
 
+            var tint = _conflictInfo.HasConflict ? ColorWarn : ColorGood;
+            DrawColoredBox(tint, DrawConflictStatusContent);
+        }
+
+        private void DrawConflictStatusContent()
+        {
             if (_conflictInfo.HasConflict)
             {
                 EditorGUILayout.HelpBox(
@@ -135,9 +229,63 @@ namespace UnityMCP.Setup
             _lastConflictCheckTime = EditorApplication.timeSinceStartup;
         }
 
+        private void RefreshClientConfiguredStatusIfDue()
+        {
+            // Same throttle as the conflict check -- cheap (up to four small file
+            // reads), but no reason to hit disk on every single repaint when this only
+            // changes when the user clicks Configure or edits a config file by hand.
+            double now = EditorApplication.timeSinceStartup;
+            if (_configuredCache.Count > 0 && now - _lastClientStatusCheckTime <= ConflictCheckIntervalSeconds) return;
+
+            foreach (var kind in MCPClientDetector.AllKinds())
+            {
+                _configuredCache[kind] = IsConfigured(kind);
+            }
+            _lastClientStatusCheckTime = now;
+        }
+
+        private static bool IsConfigured(MCPClientKind kind)
+        {
+            var configPath = MCPMcpConfigTargets.AbsolutePath(kind, MCPProjectUtil.ProjectRoot);
+            if (!File.Exists(configPath)) return false;
+
+            string content;
+            try { content = File.ReadAllText(configPath); }
+            catch { return false; }
+
+            var serverName = CurrentServerName();
+            return MCPMcpConfigTargets.Format(kind) == MCPConfigFormat.Toml
+                ? MCPCodexTomlWriter.IsConfigured(content, serverName)
+                : MCPMcpServersJsonWriter.IsConfigured(content, serverName);
+        }
+
         private void DrawClientSection(MCPClientKind kind)
         {
+            bool configured = _configuredCache.TryGetValue(kind, out var c) && c;
+            bool isLastConfigured = MCPClientConfigTracker.TryGetLastConfigured(out var lastKind, out _) && lastKind == kind;
+
+            var tint = configured ? ColorGood : ColorNeutral;
+            DrawColoredBox(tint, () => DrawClientSectionContent(kind, configured, isLastConfigured));
+        }
+
+        private void DrawClientSectionContent(MCPClientKind kind, bool configured, bool isLastConfigured)
+        {
+            GUILayout.BeginHorizontal();
+            var dotColor = configured ? new Color(0.15f, 0.6f, 0.15f) : Color.gray;
+            var previousColor = GUI.color;
+            GUI.color = dotColor;
+            GUILayout.Label(configured ? "●" : "○", GUILayout.Width(14));
+            GUI.color = previousColor;
+
             GUILayout.Label(MCPClientDetector.DisplayName(kind), EditorStyles.boldLabel);
+
+            if (isLastConfigured)
+            {
+                GUILayout.FlexibleSpace();
+                GUILayout.Label("★ Last configured", EditorStyles.miniLabel);
+            }
+            GUILayout.EndHorizontal();
+
             GUILayout.Label(MCPMcpConfigTargets.RelativePathDisplay(kind), EditorStyles.miniLabel);
 
             GUILayout.BeginHorizontal();
@@ -165,10 +313,10 @@ namespace UnityMCP.Setup
 
         private void CheckStatus(MCPClientKind kind)
         {
-            var serverName = CurrentServerName();
-            var configPath = MCPMcpConfigTargets.AbsolutePath(kind, MCPProjectUtil.ProjectRoot);
             var displayName = MCPClientDetector.DisplayName(kind);
+            var configPath = MCPMcpConfigTargets.AbsolutePath(kind, MCPProjectUtil.ProjectRoot);
             var relativePath = MCPMcpConfigTargets.RelativePathDisplay(kind);
+            var serverName = CurrentServerName();
 
             if (!File.Exists(configPath))
             {
@@ -177,21 +325,8 @@ namespace UnityMCP.Setup
                 return;
             }
 
-            string content;
-            try
-            {
-                content = File.ReadAllText(configPath);
-            }
-            catch (Exception e)
-            {
-                _statusType = MessageType.Warning;
-                _statusMessage = $"{displayName}: could not read {relativePath} — {e.Message}";
-                return;
-            }
-
-            bool configured = MCPMcpConfigTargets.Format(kind) == MCPConfigFormat.Toml
-                ? MCPCodexTomlWriter.IsConfigured(content, serverName)
-                : MCPMcpServersJsonWriter.IsConfigured(content, serverName);
+            bool configured = IsConfigured(kind);
+            _configuredCache[kind] = configured;
 
             _statusType = MessageType.Info;
             _statusMessage = configured
@@ -203,11 +338,11 @@ namespace UnityMCP.Setup
         {
             var displayName = MCPClientDetector.DisplayName(kind);
 
-            var pythonServerPath = MCPToolBuilderSettings.PythonServerPath;
+            var pythonServerPath = MCPPythonServerSettings.PythonServerPath;
             if (string.IsNullOrEmpty(pythonServerPath))
             {
                 _statusType = MessageType.Error;
-                _statusMessage = "Set the Python server location in the Python Server or Tool Builder window before configuring a client.";
+                _statusMessage = "Set the Python server location above before configuring a client.";
                 return;
             }
 
@@ -273,12 +408,48 @@ namespace UnityMCP.Setup
                 return;
             }
 
+            MCPClientConfigTracker.RecordConfigured(kind, DateTime.UtcNow);
+            _configuredCache[kind] = true;
+
             _statusType = MessageType.Info;
             _statusMessage = $"{displayName}: wrote {relativePath}. Restart your {displayName} session to pick it up." +
                 (kind == MCPClientKind.Codex
                     ? " Codex only loads project-scoped config for directories you've marked as trusted — check that in Codex if it doesn't show up."
                     : "") +
                 $" This file contains an absolute, machine-specific path — consider adding {relativePath} to .gitignore rather than committing it, so teammates each generate their own.";
+        }
+
+        private void DrawPythonServerSection()
+        {
+            DrawColoredBox(
+                string.IsNullOrEmpty(MCPPythonServerSettings.PythonServerPath) ? ColorWarn : ColorGood,
+                DrawPythonServerSectionContent);
+        }
+
+        private void DrawPythonServerSectionContent()
+        {
+            GUILayout.Label("Python Server Location", EditorStyles.boldLabel);
+            GUILayout.BeginHorizontal();
+            var current = MCPPythonServerSettings.PythonServerPath;
+            var updated = EditorGUILayout.TextField(current);
+            if (updated != current) MCPPythonServerSettings.PythonServerPath = updated;
+
+            if (GUILayout.Button("Browse...", GUILayout.Width(80)))
+            {
+                var chosen = EditorUtility.OpenFolderPanel(
+                    "Select the unity_mcp_server folder", MCPPythonServerSettings.PythonServerPath, "");
+                if (!string.IsNullOrEmpty(chosen)) MCPPythonServerSettings.PythonServerPath = chosen;
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Label("The folder containing workflows.py and server.py. Needed before Configure can write a client's config.", EditorStyles.miniLabel);
+        }
+
+        private void DrawLastConfiguredSection()
+        {
+            if (!MCPClientConfigTracker.TryGetLastConfigured(out var kind, out var configuredAtUtc)) return;
+
+            var relative = MCPClientConfigTracker.FormatRelativeTime(configuredAtUtc, DateTime.UtcNow);
+            GUILayout.Label($"Last configured: {MCPClientDetector.DisplayName(kind)} ({relative})", EditorStyles.miniLabel);
         }
     }
 }

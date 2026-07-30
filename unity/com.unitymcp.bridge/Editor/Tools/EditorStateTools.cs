@@ -5,6 +5,20 @@ using UnityMCP;
 
 namespace UnityMCP.Tools
 {
+    // Play Mode control (enter/exit/pause) used to be duplicated here AND in
+    // PlayModeTools.cs under different groups ("core" vs "testing"). Both
+    // definitions registered the same tool name, so MCPToolRegistry.Rescan()
+    // silently dropped whichever one it happened to encounter second (see
+    // MCPToolRegistry.Rescan -- assembly/type enumeration order is not
+    // guaranteed stable), meaning the ACTIVE implementation of enter_play_mode
+    // etc. could flip between the naive version below (returned immediately,
+    // before the domain reload a Play Mode transition triggers had settled)
+    // and PlayModeTools' version (waits for the transition to fully complete).
+    // Whichever tool call landed right after an immediate-return enter_play_mode
+    // could hit the bridge mid-teardown, which is one real contributor to "the
+    // connection just drops for no obvious reason" reports. Kept only
+    // PlayModeTools' wait-for-settle versions; this file now owns only
+    // save_project, which was never duplicated.
     public static class EditorStateTools
     {
         [MCPTool(
@@ -16,7 +30,7 @@ namespace UnityMCP.Tools
         {
             // Save modified assets in the project
             AssetDatabase.SaveAssets();
-            
+
             // Save all open and modified scenes
             bool scenesSaved = EditorSceneManager.SaveOpenScenes();
 
@@ -26,59 +40,6 @@ namespace UnityMCP.Tools
             }
 
             return MCPResult.Success();
-        }
-
-        [MCPTool(
-            "enter_play_mode",
-            "Enters Play Mode in the Unity Editor. Use this to start simulating the game.",
-            group: "core"
-        )]
-        public static MCPResult EnterPlayMode(MCPToolContext ctx)
-        {
-            if (EditorApplication.isPlaying)
-            {
-                return MCPResult.Fail("The Unity Editor is already in Play Mode.");
-            }
-
-            EditorApplication.isPlaying = true;
-            return MCPResult.Success(new { state = "Playing" });
-        }
-
-        [MCPTool(
-            "exit_play_mode",
-            "Exits Play Mode in the Unity Editor, returning to Edit Mode.",
-            group: "core"
-        )]
-        public static MCPResult ExitPlayMode(MCPToolContext ctx)
-        {
-            if (!EditorApplication.isPlaying)
-            {
-                return MCPResult.Fail("The Unity Editor is not currently in Play Mode.");
-            }
-
-            EditorApplication.isPlaying = false;
-            return MCPResult.Success(new { state = "Edit Mode" });
-        }
-
-        [MCPTool(
-            "pause_play_mode",
-            "Toggles or sets the pause state of the Unity Editor. Highly useful for freezing the scene during Play Mode to inspect values.",
-            group: "core"
-        )]
-        public static MCPResult PausePlayMode(
-            MCPToolContext ctx,
-            [MCPParam("Set to true to pause the Editor, or false to unpause. Omit to simply toggle the current state.")] bool? pause = null)
-        {
-            if (pause.HasValue)
-            {
-                EditorApplication.isPaused = pause.Value;
-            }
-            else
-            {
-                EditorApplication.isPaused = !EditorApplication.isPaused;
-            }
-
-            return MCPResult.Success(new { isPaused = EditorApplication.isPaused });
         }
     }
 }

@@ -54,18 +54,34 @@ namespace UnityMCP
         /// </summary>
         public string Group { get; }
 
+        /// <summary>
+        /// Marks a tool as read-only (never mutates the project/scene/filesystem in a way
+        /// that matters to the caller). Surfaced to MCP clients as the spec's `readOnlyHint`
+        /// annotation (see docs/tool-scaling-strategy.md section 7) — well-behaved clients
+        /// use it to skip a confirmation prompt they'd otherwise show. Opt-in and false by
+        /// default on purpose: an unreviewed tool defaulting to "safe" would be the wrong
+        /// direction for a security-relevant hint. Every `true` here was individually
+        /// hand-verified against its method body (not just guessed from the `get_`/`list_`
+        /// name prefix) — two tools that looked read-only by name, get_frame_debugger_info
+        /// and capture_profiler_frames, were deliberately left false because they flip a
+        /// global Profiler/FrameDebugger recording toggle as a side effect.
+        /// </summary>
+        public bool ReadOnly { get; }
+
         public MCPToolAttribute(
             string name,
             string description,
             MCPLatencyTier latencyTier = MCPLatencyTier.Fast,
             bool destructive = false,
-            string group = "core")
+            string group = "core",
+            bool readOnly = false)
         {
             Name = name;
             Description = description;
             LatencyTier = latencyTier;
             Destructive = destructive;
             Group = group;
+            ReadOnly = readOnly;
         }
     }
 }

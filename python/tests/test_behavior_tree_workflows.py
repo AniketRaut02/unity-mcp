@@ -28,15 +28,16 @@ async def main():
         client = UnityBridgeClient(project_root=tmp_root)
 
         # --- Registry sanity ---
+        # A subset check, not exact equality: this file is about the Behavior Tree
+        # tools specifically, so it shouldn't need editing every time an unrelated
+        # batch (align_gameobjects, replace_prefab_instances, ...) registers a new
+        # workflow elsewhere. An exact-equality assertion here already had to be
+        # updated twice for exactly that reason before being loosened to this.
         names = {wf.name for wf in workflows.all_workflows()}
-        assert names == {
-            "batch_execute",
-            "manage_tools",
-            "scaffold_behavior_tree_framework",
-            "create_behavior_tree",
-            "add_behavior_tree_node",
-        }, names
-        print("[PASS] workflow registry contains exactly the expected five tools:", names)
+        bt_names = {"scaffold_behavior_tree_framework", "create_behavior_tree", "add_behavior_tree_node"}
+        assert bt_names.issubset(names), f"missing BT tools: {bt_names - names}"
+        assert {"batch_execute", "manage_tools"}.issubset(names), "core composites missing from the registry"
+        print("[PASS] workflow registry contains the expected Behavior Tree + core tools (among possibly others):", names)
 
         # --- scaffold_behavior_tree_framework: first call creates all 6 files ---
         scaffold_wf = workflows.get_workflow("scaffold_behavior_tree_framework")

@@ -42,6 +42,8 @@ async def main():
             "add_component",
             "batch_execute",
             "manage_tools",
+            "align_gameobjects",
+            "snap_to_ground",
         }
         assert names == expected, names
         print("[PASS] server.list_tools() -> (core group only, by default)", names)

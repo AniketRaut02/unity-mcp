@@ -61,5 +61,7 @@ namespace UnityMCP.Protocol
         public string latency_tier; // "fast" | "slow"
         public string group; // "core" | "scripting" | "physics" | "assets" | "ui" | ...
         public Dictionary<string, object> schema;
+        public bool destructive;
+        public bool read_only;
     }
 }

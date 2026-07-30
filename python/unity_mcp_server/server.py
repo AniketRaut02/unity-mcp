@@ -24,20 +24,40 @@ import json
 import logging
 import os
 import sys
+import time
 
 import mcp.server.stdio
 import mcp.types as types
 from mcp.server import Server
 from mcp.server.lowlevel.server import NotificationOptions
 
-from . import groups, workflows
+from . import groups, security, workflows
 from .bridge_client import BridgeError, UnityBridgeClient
 
 # Log to stderr only — stdout is the MCP transport channel and must stay clean JSON-RPC.
 logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("unity_mcp.server")
 
-server = Server("unity-mcp", version="0.6.0")
+# Sent once at session initialization (InitializationOptions.instructions -> a real
+# field on the installed mcp package, confirmed via direct inspection, not assumed) --
+# far cheaper than a per-tool-call cost, so this is the right place to teach the
+# search-first workflow instead of leaving a client to discover it by trial and error.
+# See docs/tool-scaling-strategy.md section 4.1.
+_SERVER_INSTRUCTIONS = (
+    "This server exposes 300+ Unity Editor tools across 26 groups; only 'core' is active "
+    "by default to keep the visible tool list small. Before guessing which group you "
+    "need, call manage_tools(action=\"search\", query=\"...\") with a few keywords "
+    "describing what you want to do -- it searches every tool's name/description/"
+    "parameters plus every group's description, and returns compact hits (tool + group + "
+    "one-line summary) without spending tokens on full schemas you might not need. Once "
+    "you know which group(s) you need, call manage_tools(action=\"activate\", "
+    "groups=[...]) (or the singular \"group\" for one) to make their full tool schemas "
+    "visible, then call the tools directly. Call manage_tools(action=\"deactivate\", "
+    "groups=[...]) for groups you're done with to keep your own context lean, "
+    "especially before switching to an unrelated task."
+)
+
+server = Server("unity-mcp", version="0.6.0", instructions=_SERVER_INSTRUCTIONS)
 bridge = UnityBridgeClient()
 
 
@@ -90,6 +110,46 @@ async def _notify_tools_changed(reason: str) -> None:
 bridge.add_reconnect_listener(lambda: _notify_tools_changed("bridge reconnected"))
 
 
+def _write_tool_manifest() -> None:
+    """
+    Writes Library/MCP/tool_manifest.json: every composite (Python @workflow) tool's
+    name/description/group, plus GROUP_CATALOG's descriptions for every group. Read by
+    the Unity Editor's Tool Groups window, which otherwise has no way to know about
+    composite tools at all -- they're hand-written Python, not [MCPTool]-attributed C#
+    methods Unity's own reflection-based registry can discover. Unity's atomic tools
+    stay entirely Unity's own business (the window reads those straight from
+    MCPToolRegistry); this file only needs to cover the gap. Best-effort: a failure to
+    write here (e.g. no discoverable Unity project root for this process) must never
+    prevent the MCP server itself from starting.
+    """
+    try:
+        project_root = security.get_project_root()
+    except FileNotFoundError:
+        return
+
+    manifest = {
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "groupDescriptions": dict(groups.GROUP_CATALOG),
+        "compositeTools": [
+            {
+                "name": wf.name,
+                "description": wf.description,
+                "group": wf.group,
+                "destructive": wf.destructive,
+                "read_only": wf.read_only,
+            }
+            for wf in workflows.all_workflows()
+        ],
+    }
+
+    try:
+        manifest_dir = project_root / "Library" / "MCP"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        (manifest_dir / "tool_manifest.json").write_text(json.dumps(manifest, indent=2))
+    except OSError as e:
+        logger.warning("Could not write tool_manifest.json for the Unity Tool Groups window: %s", e)
+
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     try:
@@ -117,6 +177,14 @@ async def list_tools() -> list[types.Tool]:
                 name=t["name"],
                 description=t.get("description", ""),
                 inputSchema=schema,
+                annotations=types.ToolAnnotations(
+                    destructiveHint=bool(t.get("destructive", False)),
+                    readOnlyHint=bool(t.get("read_only", False)),
+                    # manage_packages hits the real Unity Package Manager registry over
+                    # the network; every other tool here only ever touches the local
+                    # Unity project -- see docs/tool-scaling-strategy.md section 7.
+                    openWorldHint=t["name"] == "manage_packages",
+                ),
             )
         )
 
@@ -124,7 +192,18 @@ async def list_tools() -> list[types.Tool]:
         if wf.group not in active:
             hidden += 1
             continue
-        tools.append(types.Tool(name=wf.name, description=wf.description, inputSchema=wf.schema))
+        tools.append(
+            types.Tool(
+                name=wf.name,
+                description=wf.description,
+                inputSchema=wf.schema,
+                annotations=types.ToolAnnotations(
+                    destructiveHint=wf.destructive,
+                    readOnlyHint=wf.read_only,
+                    openWorldHint=False,
+                ),
+            )
+        )
 
     logger.info(
         "Advertised %d tool(s) (active groups: %s); %d hidden by inactive groups.",
@@ -137,6 +216,25 @@ async def list_tools() -> list[types.Tool]:
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     wf = workflows.get_workflow(name)
     if wf is not None:
+        # Unity refuses a disabled group's own atomic tools itself (it owns the
+        # config file and is the sole enforcement point for its own tools); composite
+        # tools live entirely in this process, so this is the only place that can
+        # refuse them. Mimics "unknown tool" rather than a distinct "disabled" error,
+        # for the same reason manage_tools does below -- a client must not be able to
+        # infer a disabled group's existence from the error message.
+        if groups.is_disabled(wf.group):
+            return [types.TextContent(type="text", text=f"Error calling '{name}': Unknown tool '{name}'.")]
+
+        # Read-Only Mode (Tool Groups window, human-only toggle) -- unlike the disabled-group
+        # check above, this isn't about hiding existence, so it gets its own explicit message
+        # rather than mimicking "unknown tool". Mirrors the equivalent check in Unity's
+        # MCPToolRegistry.Invoke for atomic tools; this is the composite-tool half of it,
+        # since composite tools never go through that C# code path at all.
+        if groups.is_read_only_mode() and not wf.read_only:
+            return [types.TextContent(
+                type="text",
+                text=f"Error calling '{name}': Tool '{name}' is not read-only, and Read-Only Mode is enabled for this project.",
+            )]
         try:
             result = await wf.handler(bridge, arguments or {})
             text = _format_result(result)
@@ -194,6 +292,8 @@ def main() -> None:
     when you'd actually want that and its security requirements.
     """
     transport = os.environ.get("UNITY_MCP_TRANSPORT", "stdio").lower()
+
+    _write_tool_manifest()
 
     try:
         if transport == "stdio":

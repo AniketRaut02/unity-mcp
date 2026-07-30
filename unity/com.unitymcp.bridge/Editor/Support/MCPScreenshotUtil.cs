@@ -16,12 +16,20 @@ namespace UnityMCP.Support
     /// filenames are sanitized/timestamped internally, callers never supply
     /// a path — there's no traversal surface to guard against.
     ///
+    /// Every capture also prunes this folder down to MaxRetainedScreenshots
+    /// (oldest first): an agent that repeatedly captures the scene/game view
+    /// over a long session had no natural cap here before, and each frame can
+    /// be several MB at typical capture sizes — left unpruned, that is a real,
+    /// unbounded source of disk growth over a long-running session.
+    ///
     /// Assumes MCPProjectUtil (used elsewhere in this project for
     /// MCPPathGuard.TryResolveWithinAssets) lives in the UnityMCP namespace
     /// — flag if that's wrong and I'll fix the using.
     /// </summary>
     internal static class MCPScreenshotUtil
     {
+        private const int MaxRetainedScreenshots = 50;
+
         internal struct CaptureResult
         {
             public bool success;
@@ -77,6 +85,7 @@ namespace UnityMCP.Support
                 var fileName = BuildFileName(fileNameHint);
                 var fullPath = Path.Combine(ScreenshotDirectory, fileName);
                 File.WriteAllBytes(fullPath, pngBytes);
+                PruneOldScreenshots();
 
                 return new CaptureResult
                 {
@@ -93,6 +102,27 @@ namespace UnityMCP.Support
             {
                 camera.targetTexture = previousTargetTexture;
                 RenderTexture.ReleaseTemporary(rt);
+            }
+        }
+
+        /// <summary>Deletes the oldest files in ScreenshotDirectory beyond MaxRetainedScreenshots. Best-effort -- a failure here should never fail the capture that just succeeded.</summary>
+        private static void PruneOldScreenshots()
+        {
+            try
+            {
+                var files = new DirectoryInfo(ScreenshotDirectory).GetFiles("*.png");
+                if (files.Length <= MaxRetainedScreenshots) return;
+
+                Array.Sort(files, (a, b) => a.CreationTimeUtc.CompareTo(b.CreationTimeUtc));
+                for (int i = 0; i < files.Length - MaxRetainedScreenshots; i++)
+                {
+                    try { files[i].Delete(); } catch { /* best-effort */ }
+                }
+            }
+            catch
+            {
+                // Directory listing failed for some reason -- not worth failing the
+                // capture that just succeeded over a cleanup step.
             }
         }
     }

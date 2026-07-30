@@ -88,6 +88,46 @@ namespace UnityMCP
         /// <summary>The port actually bound this session, or 0 if not currently listening.</summary>
         public static int BoundPort => _running ? _boundPort : 0;
 
+        /// <summary>
+        /// True when the last Start() attempt bailed out specifically because another
+        /// live Unity process already holds MCPInstanceLock for this project -- as
+        /// opposed to not running for some other reason (couldn't bind any port,
+        /// Editor still initializing, etc). The Setup window uses this to show a
+        /// distinct, unmissable message rather than a generic "not running", since
+        /// this is the exact failure mode that used to go unreported while the two
+        /// instances silently fought over session.json underneath the user.
+        /// </summary>
+        public static bool LastStartBlockedByInstanceLock { get; private set; }
+
+        // SessionState (not a plain field) specifically because this needs to survive
+        // the domain reload that Stop()/Start() are racing against on virtually every
+        // Play Mode transition by default -- a plain static field would already read
+        // back as its default (false) by the time Start() runs again in the freshly
+        // reloaded AppDomain, which is exactly the gap that made "0 clients" in the
+        // Setup window indistinguishable from "nobody has ever connected" right after
+        // the single most common trigger for a client-count drop.
+        private const string SessionKeyHadClientBeforeRestart = "UnityMCP.HadConnectedClientBeforeRestart";
+
+        private static double _startedAtEditorTime;
+
+        /// <summary>
+        /// True if, at the moment of the most recent Stop(), at least one MCP client
+        /// had an authenticated connection open. Re-derived fresh on every Stop() (see
+        /// there), so it always reflects what was true immediately before the CURRENT
+        /// bridge incarnation started, not some earlier one.
+        /// </summary>
+        public static bool HadClientBeforeLastRestart => SessionState.GetBool(SessionKeyHadClientBeforeRestart, false);
+
+        /// <summary>
+        /// Seconds since the current bridge incarnation's Start() succeeded, or
+        /// positive infinity if not currently running. The Setup window uses this to
+        /// only show the "just restarted, a client will reconnect automatically" hint
+        /// for a short window after a restart, rather than leaving it up forever if a
+        /// client never actually comes back (e.g. the AI tool was closed, not just
+        /// riding out a domain reload).
+        /// </summary>
+        public static double SecondsSinceStart => _running ? EditorApplication.timeSinceStartup - _startedAtEditorTime : double.PositiveInfinity;
+
         private static int _connectedClientCount;
 
         /// <summary>
@@ -101,6 +141,8 @@ namespace UnityMCP
         public static void Start()
         {
             if (_running) return;
+
+            LastStartBlockedByInstanceLock = false;
 
             string token = MCPAuthHandshake.EnsureToken();
             MCPToolRegistry.EnsureScanned();
@@ -138,14 +180,32 @@ namespace UnityMCP
 
             _boundPort = port;
 
-            // Check what's CURRENTLY on disk before we overwrite it -- if it belongs to
-            // another still-live Unity process for this same project, that's the exact
-            // incident class reported in production (see MCPInstanceConflictDetector):
-            // that other process's port ends up being what an MCP client actually
-            // connects to, while this Editor's own Setup window shows this process's own
-            // port, making the two disagree with no obvious explanation. Logged now,
-            // proactively, rather than only being discoverable by opening the Setup
-            // window and clicking a button.
+            // The actual mutual-exclusion gate: only the one process that holds this
+            // lock is allowed to claim session.json for this project (see
+            // MCPInstanceLock for why this replaces a PID-comparison heuristic with a
+            // real OS-level guarantee). Must happen BEFORE MCPSessionFile.Write() --
+            // writing unconditionally is what let two live instances silently
+            // clobber each other's session.json on every domain reload, redirecting
+            // an already-connected client to whichever one wrote last with no error
+            // at all.
+            if (!MCPInstanceLock.TryAcquire(MCPProjectUtil.ProjectRoot, out var lockError))
+            {
+                LastStartBlockedByInstanceLock = true;
+                Debug.LogError(
+                    $"[MCP] {lockError} Close the other Unity instance for this project, then click Retry in " +
+                    "Window > Unity MCP > Setup (or reopen this project) to try again. This instance will NOT " +
+                    "listen or publish a session file, so MCP clients will keep talking to the other, already-running instance.");
+
+                try { _listener.Stop(); } catch { /* best-effort */ }
+                _listener = null;
+                _boundPort = 0;
+                return;
+            }
+
+            // Check what's CURRENTLY on disk before we overwrite it -- purely
+            // informational at this point (we already know, via the lock above, that
+            // we are the sole legitimate owner going forward); still logged proactively
+            // since a lingering stale entry is worth knowing about even when harmless.
             var conflict = MCPInstanceConflictDetector.DetectReal(port);
             if (conflict.HasConflict)
             {
@@ -155,6 +215,7 @@ namespace UnityMCP
             MCPSessionFile.Write(port, token);
 
             _running = true;
+            _startedAtEditorTime = EditorApplication.timeSinceStartup;
             _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "MCP-Accept" };
             _acceptThread.Start();
 
@@ -164,6 +225,13 @@ namespace UnityMCP
         public static void Stop()
         {
             if (!_running) return;
+
+            // Captured BEFORE _running flips false and the domain reload (if that's
+            // what triggered this Stop()) wipes _connectedClientCount back to 0 --
+            // this is the one moment this process still knows whether a client was
+            // genuinely connected right up until now.
+            SessionState.SetBool(SessionKeyHadClientBeforeRestart, _connectedClientCount > 0);
+
             _running = false;
             try { _listener?.Stop(); } catch { /* listener already gone */ }
 
@@ -171,6 +239,14 @@ namespace UnityMCP
             // (port, token) pair with no live listener behind it — better a clear
             // "connection refused" / "no session file" than a silent stale match.
             MCPSessionFile.Delete();
+
+            // Release the instance lock LAST, and always (even though only a process
+            // that actually got past MCPInstanceLock.TryAcquire in Start() could ever
+            // be _running in the first place) -- this is what lets a domain reload's
+            // beforeAssemblyReload -> Stop() -> (reload) -> Start() cycle reacquire
+            // the SAME lock again in the same OS process without deadlocking against
+            // its own still-open handle from before the reload.
+            MCPInstanceLock.Release();
         }
 
         private static void AcceptLoop()

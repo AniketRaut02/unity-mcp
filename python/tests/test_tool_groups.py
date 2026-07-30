@@ -36,7 +36,12 @@ async def main():
         # --- 1. Default visibility: only 'core' group tools ---
         tools = await mcp_server_module.list_tools()
         names = {t.name for t in tools}
-        expected_default = {"create_gameobject", "get_hierarchy", "add_component", "batch_execute", "manage_tools"}
+        expected_default = {
+            "create_gameobject", "get_hierarchy", "add_component", "batch_execute", "manage_tools",
+            # Registered under the default "core" group in workflows.py -- always
+            # visible, same as batch_execute/manage_tools, not gated behind manage_tools activate.
+            "align_gameobjects", "snap_to_ground",
+        }
         assert names == expected_default, names
         print("[PASS] by default, only 'core'-group tools are visible:", names)
 
@@ -46,15 +51,24 @@ async def main():
         payload = json.loads(list_groups_content[0].text)
         groups_by_name = {g["group"]: g for g in payload["groups"]}
 
-        assert set(groups_by_name.keys()) == {"core", "scripting", "physics", "assets", "ui", "behavior_tree"}, groups_by_name.keys()
+        # Kept as an explicit set (not "however many GROUP_CATALOG currently has")
+        # specifically so adding a new group without updating this test fails loudly
+        # here, rather than the mismatch going unnoticed the way it previously had
+        # (this assertion was stale -- missing 'inspection' and 'testing' -- until
+        # the 'scene' group's addition prompted fixing it).
+        assert set(groups_by_name.keys()) == {
+            "core", "scripting", "physics", "assets", "ui", "behavior_tree", "inspection", "testing", "scene",
+            "lighting", "cameras", "navmesh", "fps_controller", "weapons", "enemy_ai", "audio", "rendering", "vfx",
+            "animation", "gameplay", "terrain", "levelgen", "timeline", "input", "profiling", "build",
+        }, groups_by_name.keys()
         assert groups_by_name["core"]["active"] is True
         assert groups_by_name["scripting"]["active"] is False
         assert groups_by_name["behavior_tree"]["active"] is False
-        print("[PASS] manage_tools list_groups reports all 6 groups with correct active state")
+        print("[PASS] manage_tools list_groups reports all 26 groups with correct active state")
 
         assert set(groups_by_name["scripting"]["tools"]) == {"create_script", "update_script", "get_compile_status"}, groups_by_name["scripting"]
         assert set(groups_by_name["behavior_tree"]["tools"]) == {
-            "scaffold_behavior_tree_framework", "create_behavior_tree", "add_behavior_tree_node",
+            "scaffold_behavior_tree_framework", "create_behavior_tree", "add_behavior_tree_node", "set_blackboard_key",
         }, groups_by_name["behavior_tree"]
         assert "batch_execute" in groups_by_name["core"]["tools"] and "manage_tools" in groups_by_name["core"]["tools"]
         print("[PASS] list_groups reports correct tool membership per group")

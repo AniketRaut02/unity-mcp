@@ -8,7 +8,7 @@ namespace UnityMCP.Tools
 {
     public static class TestRunnerTools
     {
-        [MCPTool("list_tests", "Lists available Unity Test Framework tests for a given mode without running them.", group: "testing")]
+        [MCPTool("list_tests", "Lists available Unity Test Framework tests for a given mode without running them.", group: "testing", readOnly: true)]
         public static MCPResult ListTests(
             MCPToolContext ctx,
             [MCPParam("\"edit\" or \"play\". Defaults to \"edit\".")] string mode = "edit",

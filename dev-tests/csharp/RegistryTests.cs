@@ -11,7 +11,6 @@ using UnityMCP.Protocol;
 using UnityMCP.Security;
 using UnityMCP.Setup;
 using UnityMCP.Tools;
-using UnityMCP.ToolBuilder;
 
 public static class TestTool
 {
@@ -33,6 +32,15 @@ public static class TestTool
     public static MCPResult TestSlow(MCPToolContext ctx)
     {
         return MCPResult.Success();
+    }
+
+    [MCPTool("test_string_array", "Test-only tool taking a required string[] and an optional one, used to verify array-parameter schema generation and wire coercion.")]
+    public static MCPResult TestStringArray(
+        MCPToolContext ctx,
+        [MCPParam("Required list of tags.")] string[] tags,
+        [MCPParam("Optional list of extra names.")] string[] extras = null)
+    {
+        return MCPResult.Success(new { tagCount = tags?.Length ?? 0, tags, extraCount = extras?.Length ?? 0 });
     }
 
     // Matches docs/writing-custom-tools.md's own §1 example verbatim, so the guide's
@@ -147,6 +155,16 @@ public static class Program
 
         bool ok3 = MCPPathGuard.TryResolveWithinAssets("/fake/project", "/etc/passwd", out fullPath, out error);
         Check(!ok3 && error != null, "path guard blocks an absolute path: " + error);
+
+        // Must run before anything below ever touches the MCPServer type: doing so
+        // triggers its static constructor, which calls the real Start() and leaves
+        // MCPInstanceLock (a process-wide singleton, correctly so in production --
+        // one process should only ever hold the lock for one project) held for
+        // whatever MCPProjectUtil.ProjectRoot resolves to at that moment. Running
+        // this test AFTER that point would mean its own TryAcquire/Release calls
+        // against unrelated temp paths would collide with that already-held real
+        // instance instead of exercising the primitive in isolation.
+        TestInstanceLock();
 
         TestScriptingTools(ctx);
         TestPhysicsTools(ctx);
@@ -545,13 +563,156 @@ public static class Program
 
         TestToolGroups();
         TestParameterSchemaPolish();
+        TestArrayParameterSupport();
         TestSetupWindowLogic();
-        TestCompositeToolGenerator();
-        TestPythonServerPathValidation();
         TestInstanceConflictDetection();
+        TestAuthHandshakeTokenSecurity();
+        TestNoDuplicatePlayModeTools();
+        TestClientCountRestartContext();
         TestPathGuardSymlinkDetection();
         TestTypeResolverCachingAndAmbiguity();
         TestHierarchyCacheObjectChangeEvents();
+    }
+
+    private static void TestInstanceLock()
+    {
+        // Regression test for the actual reported incident: two live Unity processes
+        // for the same project used to both keep overwriting session.json on every
+        // domain reload (MCPInstanceConflictDetector only ever logged a warning, it
+        // never stopped the second one from writing) -- a connected MCP client would
+        // silently get redirected to whichever process wrote last, with no error at
+        // all. MCPInstanceLock is the actual mutual-exclusion fix: it's an OS-level
+        // exclusive file lock, so this test verifies the real primitive, not a mock of it.
+        var tempRoot = Path.Combine(Path.GetTempPath(), "mcp_instancelock_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            bool first = MCPInstanceLock.TryAcquire(tempRoot, out var firstError);
+            Check(first && firstError == null, "first TryAcquire for a project with no existing lock holder succeeds: " + firstError);
+            Check(MCPInstanceLock.IsHeld, "IsHeld reflects that this process now holds the lock");
+
+            bool second = MCPInstanceLock.TryAcquire(tempRoot, out var secondError);
+            Check(second, "a second TryAcquire from the SAME process (already holding it) is idempotent, not a failure: " + secondError);
+
+            MCPInstanceLock.Release();
+            Check(!MCPInstanceLock.IsHeld, "IsHeld reflects that the lock was released");
+
+            bool third = MCPInstanceLock.TryAcquire(tempRoot, out var thirdError);
+            Check(third && thirdError == null, "TryAcquire succeeds again after Release() -- the same process can reacquire after letting go (models a domain reload's Stop() -> Start() cycle): " + thirdError);
+
+            MCPInstanceLock.Release();
+
+            // Simulate a genuinely different, still-live process holding the lock: an
+            // independent FileStream opened with FileShare.None on the same lock file,
+            // exactly what a second live Unity OS process would produce.
+            var lockPath = Path.Combine(tempRoot, "Library", "MCP", "bridge.lock");
+            Directory.CreateDirectory(Path.GetDirectoryName(lockPath));
+            using (var externalHolder = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                bool blocked = MCPInstanceLock.TryAcquire(tempRoot, out var blockedError);
+                Check(!blocked && !string.IsNullOrEmpty(blockedError),
+                    "TryAcquire fails with a clear error when another handle already holds the lock file exclusively: " + blockedError);
+                Check(!MCPInstanceLock.IsHeld, "IsHeld is false after a failed TryAcquire -- no false claim of ownership");
+            }
+
+            // Once the external holder releases (Dispose, above), the lock is free again.
+            bool afterExternalRelease = MCPInstanceLock.TryAcquire(tempRoot, out var afterError);
+            Check(afterExternalRelease && afterError == null,
+                "TryAcquire succeeds once the previously-blocking external handle is closed: " + afterError);
+            MCPInstanceLock.Release();
+        }
+        finally
+        {
+            try { Directory.Delete(tempRoot, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
+
+    private static void TestAuthHandshakeTokenSecurity()
+    {
+        var tokenA = MCPAuthHandshake.EnsureToken();
+        Check(!string.IsNullOrEmpty(tokenA) && tokenA.Length == 64,
+            "EnsureToken produces a 64-hex-char (32-byte) token: length " + tokenA.Length);
+
+        bool isHex = true;
+        foreach (var c in tokenA)
+        {
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { isHex = false; break; }
+        }
+        Check(isHex, "the token is lowercase-hex-encoded: " + tokenA);
+
+        Check(MCPAuthHandshake.Validate(tokenA), "Validate accepts the token that was just generated");
+        Check(!MCPAuthHandshake.Validate(tokenA.Substring(0, 63) + (tokenA[63] == 'a' ? 'b' : 'a')),
+            "Validate rejects a token that differs in only the last character");
+        Check(!MCPAuthHandshake.Validate(null), "Validate rejects a null token without throwing");
+        Check(!MCPAuthHandshake.Validate(""), "Validate rejects an empty token");
+
+        var tokenB = MCPAuthHandshake.EnsureToken();
+        Check(tokenA != tokenB, "two successive EnsureToken() calls produce different tokens");
+        Check(!MCPAuthHandshake.Validate(tokenA), "the OLD token is rejected once a new one has been generated (EnsureToken fully replaces it, not appends)");
+        Check(MCPAuthHandshake.Validate(tokenB), "the NEW token validates correctly");
+    }
+
+    private static void TestClientCountRestartContext()
+    {
+        // Regression test for a real reported confusion: the Setup window showed "0
+        // clients" immediately upon entering Play Mode even though the AI agent's MCP
+        // session never saw an interruption, with no indication of why. The 0 itself
+        // was correct (Play Mode's domain reload -- on by default unless Enter Play
+        // Mode Options disables it -- wipes MCPServer's static state, including
+        // _connectedClientCount, and drops the bridge's live socket), but the Setup
+        // window had no way to tell that apart from "nobody has ever connected" or
+        // "something is actually broken". HadClientBeforeLastRestart/SecondsSinceStart
+        // are what it now uses to tell those apart -- exercised here via a real
+        // Stop()/Start() cycle (which is exactly what beforeAssemblyReload -> domain
+        // reload -> the static constructor's Start() call looks like from a single
+        // process's point of view), not a mock of it.
+        bool wasRunning = MCPServer.BoundPort > 0;
+
+        MCPServer.Stop();
+        Check(double.IsPositiveInfinity(MCPServer.SecondsSinceStart), "SecondsSinceStart is +Infinity while the bridge is not running -- never a false 'just started' reading");
+        Check(!MCPServer.HadClientBeforeLastRestart, "HadClientBeforeLastRestart is false after a Stop() with zero clients connected at the time");
+
+        MCPServer.Start();
+        Check(MCPServer.BoundPort > 0, "MCPServer restarts successfully after Stop() -- models the Stop() -> (domain reload) -> Start() cycle a Play Mode transition triggers by default");
+        Check(!double.IsPositiveInfinity(MCPServer.SecondsSinceStart) && MCPServer.SecondsSinceStart >= 0,
+            "SecondsSinceStart is a finite, non-negative reading once running again: " + MCPServer.SecondsSinceStart);
+
+        // SessionState itself (not MCPServer) is what has to survive the domain
+        // reload boundary -- sanity-check the underlying primitive directly, since a
+        // plain static field would silently defeat the whole point of this fix.
+        UnityEditor.SessionState.SetBool("mcp_test_session_key", true);
+        Check(UnityEditor.SessionState.GetBool("mcp_test_session_key", false), "SessionState round-trips a bool set earlier in the same process (models surviving a domain reload, which this stub process never actually performs)");
+        Check(UnityEditor.SessionState.GetBool("mcp_test_key_never_set", false) == false, "SessionState.GetBool returns the given default for a key that was never set");
+
+        if (!wasRunning) MCPServer.Stop(); // leave state as found for anything that runs after this
+    }
+
+    private static void TestNoDuplicatePlayModeTools()
+    {
+        // Regression test for the second reported drawback: enter_play_mode,
+        // exit_play_mode, and pause_play_mode used to be defined in BOTH
+        // EditorStateTools.cs and PlayModeTools.cs. MCPToolRegistry.Rescan() silently
+        // dropped whichever one it scanned second (assembly/type enumeration order is
+        // not a stable contract), so which behavior was actually live could vary --
+        // including the naive EditorStateTools version that returned immediately
+        // instead of waiting for the Play Mode transition (and any domain reload it
+        // triggers) to settle. Only PlayModeTools' versions should exist now.
+        MCPToolRegistry.EnsureScanned();
+
+        foreach (var name in new[] { "enter_play_mode", "exit_play_mode", "pause_play_mode" })
+        {
+            Check(MCPToolRegistry.TryGet(name, out var entry), $"'{name}' is registered exactly once (no silent duplicate-drop possible with only one definition left)");
+            Check(entry?.Group == "testing", $"'{name}' resolves to the PlayModeTools definition (group 'testing'), not the removed EditorStateTools one (group 'core'): got '{entry?.Group}'");
+        }
+
+        MCPToolRegistry.TryGet("enter_play_mode", out var enterEntry);
+        var enterProps = (Dictionary<string, object>)enterEntry.Schema["properties"];
+        Check(enterProps.ContainsKey("timeoutSeconds"),
+            "the surviving enter_play_mode is PlayModeTools' wait-for-settle version, identifiable by its 'timeoutSeconds' parameter (the removed EditorStateTools version had none)");
+
+        Check(MCPToolRegistry.TryGet("save_project", out var saveEntry) && saveEntry.Group == "core",
+            "save_project (never duplicated) is still registered under 'core', confirming EditorStateTools itself wasn't broken by removing the duplicates from it");
     }
 
     private static void TestParameterSchemaPolish()
@@ -611,6 +772,62 @@ public static class Program
         var spawnResult = MCPToolRegistry.Invoke(
             "spawn_coin", new Dictionary<string, object> { ["x"] = 1f, ["y"] = 2f, ["z"] = 3f }, ctx2);
         Check(spawnResult.Ok, "the guide example's tool actually runs successfully end-to-end (no GameObject resolution needed, so this isn't limited by the usual stub gap): " + spawnResult.Error);
+    }
+
+    private static void TestArrayParameterSupport()
+    {
+        // Regression test for a real gap found while building out the 300-tool
+        // catalog: MCPToolRegistry had no support at all for string[]-typed
+        // parameters -- BuildSchema fell through to a bare "string" type (wrong
+        // shape entirely) and ConvertArg would throw trying to Convert.ChangeType a
+        // JSON array into a string[]. A large fraction of the remaining catalog
+        // (references, tags, bindings, inventories, ...) needs list-of-strings
+        // parameters, so this had to be fixed before building those tools, not
+        // worked around per-tool.
+        MCPToolRegistry.EnsureScanned();
+
+        MCPToolRegistry.TryGet("test_string_array", out var entry);
+        Check(entry != null, "test_string_array is registered");
+
+        var props = (Dictionary<string, object>)entry.Schema["properties"];
+        var tagsProp = (Dictionary<string, object>)props["tags"];
+        Check((string)tagsProp["type"] == "array", "a string[] parameter's schema type is 'array', not a bare 'string': " + tagsProp["type"]);
+        var items = (Dictionary<string, object>)tagsProp["items"];
+        Check((string)items["type"] == "string", "the array schema's 'items' declares string elements: " + items["type"]);
+
+        var required = (List<string>)entry.Schema["required"];
+        Check(required.Contains("tags"), "a required string[] parameter (no default) is marked required in the schema");
+        Check(!required.Contains("extras"), "an optional string[] parameter (default null) is NOT marked required");
+
+        var ctx = new MCPToolContext { RequestId = "array-test" };
+
+        // The wire path: Newtonsoft deserializes a JSON array nested inside a
+        // Dictionary<string, object> as a JArray, not a plain List<object> -- exercise
+        // that exact type, not a stand-in, since that's what ConvertArg actually has
+        // to handle in production.
+        var wireArray = new Newtonsoft.Json.Linq.JArray("alpha", "beta", "gamma");
+        var wireResult = MCPToolRegistry.Invoke(
+            "test_string_array", new Dictionary<string, object> { ["tags"] = wireArray }, ctx);
+        Check(wireResult.Ok, "a real JArray (the actual wire deserialization shape) is accepted for a string[] parameter: " + wireResult.Error);
+
+        // Also accept a plain List<object>/object[] -- ConvertArg is written against
+        // IEnumerable generally, not JArray specifically, so a direct (non-wire) caller
+        // passing a real collection must work too.
+        var listResult = MCPToolRegistry.Invoke(
+            "test_string_array",
+            new Dictionary<string, object> { ["tags"] = new List<object> { "x", "y" } },
+            ctx);
+        int listTagCount = listResult.Ok ? (int)listResult.Data.GetType().GetProperty("tagCount").GetValue(listResult.Data) : -1;
+        Check(listResult.Ok && listTagCount == 2,
+            "a plain List<object> is also accepted and coerced to the correct string[] length: " + listResult.Error);
+
+        // Omitting the optional string[] entirely must not throw -- it should fall
+        // through to its null default, same as any other optional parameter.
+        var omittedResult = MCPToolRegistry.Invoke(
+            "test_string_array",
+            new Dictionary<string, object> { ["tags"] = new Newtonsoft.Json.Linq.JArray("solo") },
+            ctx);
+        Check(omittedResult.Ok, "omitting the optional string[] parameter entirely does not throw: " + omittedResult.Error);
     }
 
     private static void TestToolGroups()
@@ -726,6 +943,67 @@ public static class Program
         TestMcpServersJsonWriterMerging();
         TestCodexTomlWriterMerging();
         TestEndToEndConfigFileWriting();
+        TestPythonServerSettings();
+        TestClientConfigTracker();
+    }
+
+    private static void TestPythonServerSettings()
+    {
+        // Moved here from the now-removed visual Tool Builder (MCPToolBuilderSettings)
+        // -- the Setup window is the only remaining consumer of this setting. Confirms
+        // the plain EditorPrefs get/set round-trip still works from its new home.
+        MCPPythonServerSettings.PythonServerPath = "/Users/dev/python-server";
+        Check(MCPPythonServerSettings.PythonServerPath == "/Users/dev/python-server",
+            "PythonServerPath round-trips through EditorPrefs: " + MCPPythonServerSettings.PythonServerPath);
+
+        MCPPythonServerSettings.PythonServerPath = "/somewhere/else";
+        Check(MCPPythonServerSettings.PythonServerPath == "/somewhere/else",
+            "PythonServerPath reflects an updated value, not just the first one ever set");
+    }
+
+    private static void TestClientConfigTracker()
+    {
+        // No client configured yet for this (test-harness-fake) project root --
+        // TryGetLastConfigured must report false, not some stale/default value from
+        // an unrelated earlier test (EditorPrefs in this stub is a flat dictionary
+        // shared process-wide, same as real EditorPrefs is shared machine-wide for a
+        // given key -- exercising this against a key that's genuinely never been
+        // written is the real "nothing configured yet" case a fresh project sees).
+        Check(!MCPClientConfigTracker.TryGetLastConfigured(out _, out _),
+            "TryGetLastConfigured returns false when nothing has ever been recorded for this key");
+
+        var now = new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc);
+        MCPClientConfigTracker.RecordConfigured(MCPClientKind.Codex, now);
+
+        bool found = MCPClientConfigTracker.TryGetLastConfigured(out var kind, out var configuredAt);
+        Check(found, "TryGetLastConfigured returns true right after RecordConfigured");
+        Check(kind == MCPClientKind.Codex, "the recorded client kind round-trips correctly: " + kind);
+        Check(configuredAt == now, $"the recorded UTC timestamp round-trips exactly (no timezone drift through the 'o' round-trip format): expected {now:o}, got {configuredAt:o}");
+
+        // Recording a second client overwrites the first -- this tracks the SINGLE
+        // most recent Configure click, not a history of every client ever configured.
+        var later = now.AddMinutes(5);
+        MCPClientConfigTracker.RecordConfigured(MCPClientKind.Cursor, later);
+        MCPClientConfigTracker.TryGetLastConfigured(out var kind2, out var configuredAt2);
+        Check(kind2 == MCPClientKind.Cursor && configuredAt2 == later,
+            "recording a second client replaces the first as 'last configured', it doesn't keep a history");
+
+        // --- FormatRelativeTime: a pure function of two DateTimes, no EditorPrefs or real clock involved ---
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now) == "just now", "zero elapsed time formats as 'just now'");
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now.AddSeconds(30)) == "just now", "30 seconds elapsed still formats as 'just now'");
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now.AddMinutes(1)) == "1 minute ago", "exactly 1 minute uses singular 'minute'");
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now.AddMinutes(5)) == "5 minutes ago", "5 minutes uses plural 'minutes'");
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now.AddHours(1)) == "1 hour ago", "exactly 1 hour uses singular 'hour'");
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now.AddHours(3)) == "3 hours ago", "3 hours uses plural 'hours'");
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now.AddDays(1)) == "1 day ago", "exactly 1 day uses singular 'day'");
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now.AddDays(2)) == "2 days ago", "2 days uses plural 'days'");
+        Check(MCPClientConfigTracker.FormatRelativeTime(now, now.AddDays(45)) == now.ToLocalTime().ToString("yyyy-MM-dd"),
+            "45 days falls back to an absolute date rather than an increasingly-useless relative phrase");
+
+        // Clock-skew guard: a "configured at" timestamp that's (impossibly) in the
+        // future relative to "now" must never render as a negative age.
+        Check(MCPClientConfigTracker.FormatRelativeTime(now.AddMinutes(5), now) == "just now",
+            "a configuredAt timestamp after 'now' (clock skew) never shows a negative age, clamps to 'just now'");
     }
 
     private static void TestMiniJsonParsing()
@@ -920,142 +1198,6 @@ public static class Program
         {
             try { Directory.Delete(tempRoot, recursive: true); } catch { /* best effort */ }
         }
-    }
-
-    private static MCPCompositeToolSpec ValidTestSpec()
-    {
-        return new MCPCompositeToolSpec
-        {
-            Name = "test_composite_tool",
-            Description = "A generated test tool.",
-            Group = "core",
-            Parameters = new List<MCPCompositeParam>
-            {
-                new MCPCompositeParam { Name = "objName", Type = MCPCompositeParamType.String, Description = "Name for the object.", Required = true }
-            },
-            Steps = new List<MCPCompositeStep>
-            {
-                new MCPCompositeStep
-                {
-                    ToolName = "create_gameobject",
-                    Args = new List<MCPCompositeStepArg> { new MCPCompositeStepArg { ArgName = "name", ValueTemplate = "{objName}" } }
-                },
-                new MCPCompositeStep
-                {
-                    ToolName = "set_transform",
-                    Args = new List<MCPCompositeStepArg>
-                    {
-                        new MCPCompositeStepArg { ArgName = "path", ValueTemplate = "{step0.path}" },
-                        new MCPCompositeStepArg { ArgName = "posX", ValueTemplate = "5" }
-                    }
-                },
-                new MCPCompositeStep
-                {
-                    ToolName = "delete_gameobject",
-                    Args = new List<MCPCompositeStepArg> { new MCPCompositeStepArg { ArgName = "path", ValueTemplate = "{step0.path}" } }
-                }
-            }
-        };
-    }
-
-    private static void TestCompositeToolGenerator()
-    {
-        MCPToolRegistry.EnsureScanned();
-
-        // --- Happy path: a real 3-step spec against REAL registered tools (create_gameobject,
-        // set_transform, delete_gameobject) generates the Python source we expect. ---
-        var generated = MCPCompositeToolGenerator.Generate(ValidTestSpec(), "", out var genError);
-        Check(genError == null, "a valid 3-step spec against real registered tools generates without error: " + genError);
-        Check(generated != null && generated.Contains("@workflow("), "generated source contains the @workflow decorator");
-        Check(generated != null && generated.Contains("\"test_composite_tool\""), "generated source contains the tool's name");
-        Check(generated != null && generated.Contains("async def _test_composite_tool(bridge, args):"),
-            "generated source contains the correctly-named async function");
-        Check(generated != null && generated.Contains("step0 = await bridge.call(\"create_gameobject\", {\"name\": args[\"objName\"]})"),
-            "step0 correctly resolves a {paramName} reference to args[\"objName\"]");
-        Check(generated != null && generated.Contains("step1 = await bridge.call(\"set_transform\", {\"path\": step0[\"path\"]"),
-            "step1 correctly resolves a {stepN.field} reference to step0[\"path\"]");
-        Check(generated != null && generated.Contains("\"confirm\": True"),
-            "the destructive step (delete_gameobject) gets confirm=True automatically appended, with no confirm field exposed in the builder UI");
-        Check(generated != null && generated.Contains("return step2"), "generated source returns the final step's result");
-
-        // Print the exact generated source so it can be cross-checked byte-for-byte against
-        // what the companion Python test (test_tool_builder_generated_code.py) actually runs
-        // -- closing the loop from "C# generates text" to "that exact text is real, working Python".
-        Console.WriteLine("--- BEGIN GENERATED SOURCE (test_composite_tool) ---");
-        Console.WriteLine(generated);
-        Console.WriteLine("--- END GENERATED SOURCE ---");
-
-        // --- Every validation failure mode, each naming the specific problem ---
-        var badName = ValidTestSpec(); badName.Name = "BadName";
-        MCPCompositeToolGenerator.Generate(badName, "", out var badNameError);
-        Check(badNameError != null && badNameError.Contains("snake_case"), "an uppercase tool name is rejected: " + badNameError);
-
-        var existingContent = "@workflow(\n    \"test_composite_tool\",\n    \"...\",\n)\nasync def _test_composite_tool(bridge, args):\n    pass\n";
-        MCPCompositeToolGenerator.Generate(ValidTestSpec(), existingContent, out var dupError);
-        Check(dupError != null && dupError.Contains("already exists"), "a duplicate tool name (already in custom_workflows.py) is rejected: " + dupError);
-
-        var noDescription = ValidTestSpec(); noDescription.Description = "";
-        MCPCompositeToolGenerator.Generate(noDescription, "", out var noDescError);
-        Check(noDescError != null && noDescError.Contains("Description is required"), "an empty description is rejected: " + noDescError);
-
-        var noSteps = ValidTestSpec(); noSteps.Steps.Clear();
-        MCPCompositeToolGenerator.Generate(noSteps, "", out var noStepsError);
-        Check(noStepsError != null && noStepsError.Contains("At least one step"), "a spec with zero steps is rejected: " + noStepsError);
-
-        var unknownTool = ValidTestSpec();
-        unknownTool.Steps[0].ToolName = "not_a_real_tool";
-        MCPCompositeToolGenerator.Generate(unknownTool, "", out var unknownToolError);
-        Check(unknownToolError != null && unknownToolError.Contains("is not a registered tool"), "a nonexistent tool name is rejected: " + unknownToolError);
-
-        var unknownArg = ValidTestSpec();
-        unknownArg.Steps[0].Args.Add(new MCPCompositeStepArg { ArgName = "bogus_arg", ValueTemplate = "x" });
-        MCPCompositeToolGenerator.Generate(unknownArg, "", out var unknownArgError);
-        Check(unknownArgError != null && unknownArgError.Contains("is not a real parameter"), "a nonexistent argument name on a real tool is rejected: " + unknownArgError);
-
-        var missingRequired = ValidTestSpec();
-        missingRequired.Steps[0].Args.Clear(); // create_gameobject requires 'name'
-        MCPCompositeToolGenerator.Generate(missingRequired, "", out var missingRequiredError);
-        Check(missingRequiredError != null && missingRequiredError.Contains("missing required argument"),
-            "omitting a required argument the target tool needs is rejected: " + missingRequiredError);
-
-        var badParamRef = ValidTestSpec();
-        badParamRef.Steps[0].Args[0].ValueTemplate = "{doesNotExist}";
-        MCPCompositeToolGenerator.Generate(badParamRef, "", out var badParamRefError);
-        Check(badParamRefError != null && badParamRefError.Contains("isn't declared"),
-            "referencing an undeclared {paramName} is rejected: " + badParamRefError);
-
-        var selfStepRef = ValidTestSpec();
-        selfStepRef.Steps[0].Args[0].ValueTemplate = "{step0.path}"; // step0 referencing itself
-        MCPCompositeToolGenerator.Generate(selfStepRef, "", out var selfStepRefError);
-        Check(selfStepRefError != null && selfStepRefError.Contains("hasn't run yet"),
-            "a step referencing itself (or a later step) is rejected: " + selfStepRefError);
-    }
-
-    private static void TestPythonServerPathValidation()
-    {
-        // --- The exact scenario a reported bug pointed at: Python server nested under
-        // the Unity project's Assets/ folder. Writing custom_workflows.py there is plain
-        // System.IO with no Unity API calls, but if Unity's own file-watcher notices the
-        // change under a folder it watches, it can trigger an unrelated reimport/recompile
-        // pass and disconnect the bridge -- this check exists specifically to catch that
-        // setup mistake before it can happen, not to explain it after the fact. ---
-        Check(MCPToolBuilderSettings.IsInsideProject("/Users/dev/MyGame/Assets/python/unity_mcp_server", "/Users/dev/MyGame"),
-            "a Python server path nested under Assets/ inside the Unity project is correctly flagged as inside the project");
-
-        Check(MCPToolBuilderSettings.IsInsideProject("/Users/dev/MyGame", "/Users/dev/MyGame"),
-            "the Python server path being exactly equal to the project root is also flagged");
-
-        Check(!MCPToolBuilderSettings.IsInsideProject("/Users/dev/unity-mcp-phase1/python/unity_mcp_server", "/Users/dev/MyGame"),
-            "a Python server path in a genuinely separate location (sibling folder layout) is NOT flagged");
-
-        // A longer sibling name that merely starts with the same prefix must not
-        // false-positive -- same class of bug as the port-collision fix's server-name check.
-        Check(!MCPToolBuilderSettings.IsInsideProject("/Users/dev/MyGame2/python", "/Users/dev/MyGame"),
-            "a differently-named sibling folder that shares a path prefix ('MyGame2' vs 'MyGame') is NOT false-flagged as inside the project");
-
-        Check(!MCPToolBuilderSettings.IsInsideProject("", "/Users/dev/MyGame"), "an empty candidate path is handled without throwing, returns false");
-        Check(!MCPToolBuilderSettings.IsInsideProject(null, "/Users/dev/MyGame"), "a null candidate path is handled without throwing, returns false");
-        Check(!MCPToolBuilderSettings.IsInsideProject("/Users/dev/python", ""), "an empty project root is handled without throwing, returns false");
     }
 
     private static void TestInstanceConflictDetection()
@@ -1259,6 +1401,17 @@ public static class Program
         // don't need the ambiguous/not-found distinction. ---
         var viaOldApi = MCPTypeResolver.Resolve("TestTool");
         Check(viaOldApi != null && viaOldApi.Name == "TestTool", "the plain Resolve() wrapper still works for simple callers");
+
+        // --- resolve_type tool: a thin registry-facing wrapper over MCPTypeResolver,
+        // exercised through Invoke() (not calling MCPTypeResolver directly) so the
+        // actual tool-call path -- schema binding included -- is what's verified. ---
+        var ctx = new MCPToolContext { RequestId = "resolve-type-test" };
+        var resolveOk = MCPToolRegistry.Invoke("resolve_type", new Dictionary<string, object> { ["typeName"] = "MonoBehaviour" }, ctx);
+        Check(resolveOk.Ok, "resolve_type succeeds for a real short type name: " + resolveOk.Error);
+
+        var resolveFail = MCPToolRegistry.Invoke("resolve_type", new Dictionary<string, object> { ["typeName"] = "ThisTypeDefinitelyDoesNotExistAnywhere" }, ctx);
+        Check(!resolveFail.Ok && resolveFail.Error != null && resolveFail.Error.Contains("not found"),
+            "resolve_type fails cleanly (not throws) for a nonexistent type: " + resolveFail.Error);
     }
 
     private static void TestHierarchyCacheObjectChangeEvents()

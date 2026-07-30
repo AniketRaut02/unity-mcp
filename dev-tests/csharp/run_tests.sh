@@ -30,6 +30,7 @@ mcs -target:exe -out:"$OUT" \
   "$UNITY_SRC/Security/MCPAuthHandshake.cs" \
   "$UNITY_SRC/Security/MCPSessionFile.cs" \
   "$UNITY_SRC/Security/MCPInstanceConflictDetector.cs" \
+  "$UNITY_SRC/Security/MCPInstanceLock.cs" \
   "$UNITY_SRC/Security/MCPRateLimiter.cs" \
   "$UNITY_SRC/Security/MCPPathGuard.cs" \
   "$UNITY_SRC/Security/MCPAuditLog.cs" \
@@ -54,10 +55,8 @@ mcs -target:exe -out:"$OUT" \
   "$UNITY_SRC/Setup/MCPCodexTomlWriter.cs" \
   "$UNITY_SRC/Setup/MCPServerEntryBuilder.cs" \
   "$UNITY_SRC/Setup/MCPMcpConfigTargets.cs" \
-  "$UNITY_SRC/Setup/MCPSetupWindow.cs" \
-  "$UNITY_SRC/ToolBuilder/MCPCompositeToolSpec.cs" \
-  "$UNITY_SRC/ToolBuilder/MCPCompositeToolGenerator.cs" \
-  "$UNITY_SRC/ToolBuilder/MCPToolBuilderSettings.cs" \
-  "$UNITY_SRC/ToolBuilder/MCPToolBuilderWindow.cs"
+  "$UNITY_SRC/Setup/MCPPythonServerSettings.cs" \
+  "$UNITY_SRC/Setup/MCPClientConfigTracker.cs" \
+  "$UNITY_SRC/Setup/MCPSetupWindow.cs"
 
 mono "$OUT"

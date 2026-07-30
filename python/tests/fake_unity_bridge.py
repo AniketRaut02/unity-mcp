@@ -39,6 +39,7 @@ FAKE_TOOLS = [
         "latency_tier": "fast",
         "group": "core",
         "schema": {"type": "object", "properties": {}, "required": []},
+        "read_only": True,
     },
     {
         "name": "add_component",

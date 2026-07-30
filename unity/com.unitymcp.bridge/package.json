@@ -1,8 +1,8 @@
 {
-  "name": "com.unitymcp.bridge",
-  "version": "1.0.0",
+  "name": "com.darkpixelgd.unitymcpbridge",
+  "version": "1.27.0",
   "displayName": "Unity MCP Bridge",
-  "description": "A Model Context Protocol (MCP) bridge for the Unity Editor. Exposes 40 atomic Editor tools (Scene, Component, Query, Scripting, Physics, Assets, UI) plus a composite/workflow layer to any MCP client (Claude Code, Codex, and others) over stdio or streamable HTTP. Includes an in-Editor Setup window for one-click client configuration and a visual Tool Builder for creating new composite tools without writing code.",
+  "description": "A Model Context Protocol (MCP) bridge for the Unity Editor. Exposes 40 atomic Editor tools (Scene, Component, Query, Scripting, Physics, Assets, UI) plus a composite/workflow layer to any MCP client (Claude Code, Codex, and others) over stdio or streamable HTTP. Includes an in-Editor Setup window for one-click, color-coded client configuration with configuration history.",
   "unity": "2021.3",
   "dependencies": {
     "com.unity.nuget.newtonsoft-json": "3.2.1"
@@ -16,7 +16,7 @@
     "automation"
   ],
   "author": {
-    "name": "TODO: your name or org"
+    "name": "DarkPixelGD"
   },
   "license": "SEE LICENSE IN LICENSE.md",
   "documentationUrl": "TODO: link to README.md once hosted (e.g. a GitHub repo URL)",

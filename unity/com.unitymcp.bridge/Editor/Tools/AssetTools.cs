@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using UnityEditor;
 using UnityEngine;
 using UnityMCP;
@@ -225,7 +227,7 @@ namespace UnityMCP.Tools
             "list_assets",
             "Lists asset paths (relative to Assets/) filtered by extension (e.g. 'prefab', 'mat', 'asset'), optionally " +
             "under a subfolder. Omit extension to list every file. .meta files are always excluded.",
-            group: "assets")]
+            group: "assets", readOnly: true)]
         public static MCPResult ListAssets(
             MCPToolContext ctx,
             [MCPParam("File extension to filter by, without the dot, e.g. 'prefab' or 'mat'. Omit to list every file.")] string extension = null,
@@ -280,6 +282,407 @@ namespace UnityMCP.Tools
                 return MCPResult.Fail($"AssetDatabase failed to delete '{unityAssetPath}'.");
 
             return MCPResult.Success();
+        }
+
+        [MCPTool(
+            "import_asset",
+            "Copies an external file into the project under Assets/ and imports it. sourcePath is an absolute path " +
+            "OUTSIDE the project (anywhere the Editor process can read); destinationPath is relative to Assets/, " +
+            "guarded the same as every other Assets/-writing tool.",
+            MCPLatencyTier.Slow,
+            group: "assets")]
+        public static MCPResult ImportAsset(
+            MCPToolContext ctx,
+            [MCPParam("Absolute path to the external file to import.")] string sourcePath,
+            [MCPParam("Destination path relative to Assets/, e.g. 'Textures/Wall.png'.")] string destinationPath)
+        {
+            if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+                return MCPResult.Fail($"Source file '{sourcePath}' does not exist.");
+
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, destinationPath, out var fullDestPath, out var guardError))
+                return MCPResult.Fail(guardError);
+
+            if (File.Exists(fullDestPath))
+                return MCPResult.Fail($"'{destinationPath}' already exists.");
+
+            Directory.CreateDirectory(Path.GetDirectoryName(fullDestPath));
+            File.Copy(sourcePath, fullDestPath);
+
+            var unityAssetPath = "Assets/" + destinationPath.Replace('\\', '/').TrimStart('/');
+            AssetDatabase.ImportAsset(unityAssetPath, ImportAssetOptions.Default);
+
+            return MCPResult.Success(new { assetPath = unityAssetPath });
+        }
+
+        [MCPTool(
+            "move_asset",
+            "Moves or renames an asset under Assets/ via AssetDatabase, preserving its GUID so references from other " +
+            "assets stay intact (unlike a raw filesystem move). Both paths are relative to Assets/.",
+            group: "assets")]
+        public static MCPResult MoveAsset(
+            MCPToolContext ctx,
+            [MCPParam("Current path relative to Assets/.")] string sourcePath,
+            [MCPParam("New path relative to Assets/.")] string destinationPath)
+        {
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, sourcePath, out var fullSourcePath, out var sourceError))
+                return MCPResult.Fail(sourceError);
+
+            if (!File.Exists(fullSourcePath) && !Directory.Exists(fullSourcePath))
+                return MCPResult.Fail($"'{sourcePath}' does not exist.");
+
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, destinationPath, out var fullDestPath, out var destError))
+                return MCPResult.Fail(destError);
+
+            if (File.Exists(fullDestPath) || Directory.Exists(fullDestPath))
+                return MCPResult.Fail($"'{destinationPath}' already exists.");
+
+            var sourceAssetPath = "Assets/" + sourcePath.Replace('\\', '/').TrimStart('/');
+            var destAssetPath = "Assets/" + destinationPath.Replace('\\', '/').TrimStart('/');
+
+            var error = AssetDatabase.MoveAsset(sourceAssetPath, destAssetPath);
+            if (!string.IsNullOrEmpty(error))
+                return MCPResult.Fail(error);
+
+            return MCPResult.Success(new { path = destAssetPath });
+        }
+
+        [MCPTool(
+            "get_asset_dependencies",
+            "Lists what an asset references (its dependencies). Optionally also lists which OTHER project assets " +
+            "reference it (reverse dependencies) -- slower, since it scans every asset under Assets/ to find them.",
+            group: "assets", readOnly: true)]
+        public static MCPResult GetAssetDependencies(
+            MCPToolContext ctx,
+            [MCPParam("Path relative to Assets/ of the asset to inspect.")] string assetPath,
+            [MCPParam("Also list assets under Assets/ that reference this one. Defaults to false (slower when true).")] bool includeReferencedBy = false,
+            [MCPParam("Include indirect (transitive) dependencies, not just direct ones. Defaults to false.")] bool recursive = false)
+        {
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, assetPath, out var fullPath, out var guardError))
+                return MCPResult.Fail(guardError);
+
+            if (!File.Exists(fullPath))
+                return MCPResult.Fail($"'{assetPath}' does not exist.");
+
+            var unityAssetPath = "Assets/" + assetPath.Replace('\\', '/').TrimStart('/');
+            var dependencies = AssetDatabase.GetDependencies(unityAssetPath, recursive)
+                .Where(p => p != unityAssetPath)
+                .OrderBy(p => p, StringComparer.Ordinal)
+                .ToList();
+
+            List<string> referencedBy = null;
+            if (includeReferencedBy)
+            {
+                referencedBy = new List<string>();
+                foreach (var candidate in AssetDatabase.GetAllAssetPaths())
+                {
+                    if (candidate == unityAssetPath || !candidate.StartsWith("Assets/", StringComparison.Ordinal)) continue;
+                    if (AssetDatabase.GetDependencies(candidate, false).Contains(unityAssetPath))
+                        referencedBy.Add(candidate);
+                }
+                referencedBy.Sort(StringComparer.Ordinal);
+            }
+
+            return MCPResult.Success(new { dependencies, referencedBy });
+        }
+
+        [MCPTool(
+            "reimport_asset",
+            "Forces a reimport of an asset using its current importer settings -- use after set_texture_import_settings " +
+            "/ set_model_import_settings, or if an asset seems stale.",
+            MCPLatencyTier.Slow,
+            group: "assets")]
+        public static MCPResult ReimportAsset(
+            MCPToolContext ctx,
+            [MCPParam("Path relative to Assets/ of the asset to reimport.")] string assetPath)
+        {
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, assetPath, out var fullPath, out var guardError))
+                return MCPResult.Fail(guardError);
+
+            if (!File.Exists(fullPath))
+                return MCPResult.Fail($"'{assetPath}' does not exist.");
+
+            var unityAssetPath = "Assets/" + assetPath.Replace('\\', '/').TrimStart('/');
+            AssetDatabase.ImportAsset(unityAssetPath, ImportAssetOptions.ForceUpdate);
+
+            return MCPResult.Success();
+        }
+
+        [MCPTool(
+            "set_texture_import_settings",
+            "Configures a texture asset's import settings: type, compression, mipmaps, sRGB, max size. Omitted " +
+            "parameters are left unchanged. Triggers a reimport.",
+            MCPLatencyTier.Slow,
+            group: "assets")]
+        public static MCPResult SetTextureImportSettings(
+            MCPToolContext ctx,
+            [MCPParam("Path relative to Assets/ of the texture asset.")] string assetPath,
+            [MCPParam("TextureImporterType name, e.g. 'Default', 'NormalMap', 'Sprite', 'GUI'. Omit to leave unchanged.")] string textureType = null,
+            [MCPParam("TextureImporterCompression name, e.g. 'Uncompressed', 'Compressed', 'CompressedHQ', 'CompressedLQ'. Omit to leave unchanged.")] string textureCompression = null,
+            [MCPParam("Generate mipmaps. Omit to leave unchanged.")] bool? mipmapEnabled = null,
+            [MCPParam("Import as sRGB (color) vs linear (data). Omit to leave unchanged.")] bool? sRGBTexture = null,
+            [MCPParam("Max texture size in pixels, e.g. 2048. Omit to leave unchanged.")] int? maxTextureSize = null)
+        {
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, assetPath, out var fullPath, out var guardError))
+                return MCPResult.Fail(guardError);
+
+            if (!File.Exists(fullPath))
+                return MCPResult.Fail($"'{assetPath}' does not exist.");
+
+            var unityAssetPath = "Assets/" + assetPath.Replace('\\', '/').TrimStart('/');
+            if (!(AssetImporter.GetAtPath(unityAssetPath) is TextureImporter importer))
+                return MCPResult.Fail($"'{assetPath}' is not imported as a texture (no TextureImporter).");
+
+            if (textureType != null)
+            {
+                if (!Enum.TryParse<TextureImporterType>(textureType, out var parsed))
+                    return MCPResult.Fail($"Unknown textureType '{textureType}'. Valid: {string.Join(", ", Enum.GetNames(typeof(TextureImporterType)))}");
+                importer.textureType = parsed;
+            }
+
+            if (textureCompression != null)
+            {
+                if (!Enum.TryParse<TextureImporterCompression>(textureCompression, out var parsed))
+                    return MCPResult.Fail($"Unknown textureCompression '{textureCompression}'. Valid: {string.Join(", ", Enum.GetNames(typeof(TextureImporterCompression)))}");
+                importer.textureCompression = parsed;
+            }
+
+            if (mipmapEnabled.HasValue) importer.mipmapEnabled = mipmapEnabled.Value;
+            if (sRGBTexture.HasValue) importer.sRGBTexture = sRGBTexture.Value;
+            if (maxTextureSize.HasValue) importer.maxTextureSize = maxTextureSize.Value;
+
+            importer.SaveAndReimport();
+            return MCPResult.Success();
+        }
+
+        [MCPTool(
+            "set_model_import_settings",
+            "Configures a model asset's import settings: animation import, animation type, material import, global " +
+            "scale. Omitted parameters are left unchanged. Triggers a reimport.",
+            MCPLatencyTier.Slow,
+            group: "assets")]
+        public static MCPResult SetModelImportSettings(
+            MCPToolContext ctx,
+            [MCPParam("Path relative to Assets/ of the model asset.")] string assetPath,
+            [MCPParam("Import animation clips from the model. Omit to leave unchanged.")] bool? importAnimation = null,
+            [MCPParam("ModelImporterAnimationType name, e.g. 'Generic', 'Humanoid', 'Legacy', 'None'. Omit to leave unchanged.")] string animationType = null,
+            [MCPParam("Import materials from the model (maps to materialImportMode: true -> ImportStandard, false -> None -- the older plain importMaterials bool this maps onto was removed in newer Unity versions). Omit to leave unchanged.")] bool? importMaterials = null,
+            [MCPParam("Uniform scale factor applied on import. Omit to leave unchanged.")] float? globalScale = null)
+        {
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, assetPath, out var fullPath, out var guardError))
+                return MCPResult.Fail(guardError);
+
+            if (!File.Exists(fullPath))
+                return MCPResult.Fail($"'{assetPath}' does not exist.");
+
+            var unityAssetPath = "Assets/" + assetPath.Replace('\\', '/').TrimStart('/');
+            if (!(AssetImporter.GetAtPath(unityAssetPath) is ModelImporter importer))
+                return MCPResult.Fail($"'{assetPath}' is not imported as a model (no ModelImporter).");
+
+            if (importAnimation.HasValue) importer.importAnimation = importAnimation.Value;
+
+            if (animationType != null)
+            {
+                if (!Enum.TryParse<ModelImporterAnimationType>(animationType, out var parsed))
+                    return MCPResult.Fail($"Unknown animationType '{animationType}'. Valid: {string.Join(", ", Enum.GetNames(typeof(ModelImporterAnimationType)))}");
+                importer.animationType = parsed;
+            }
+
+            if (importMaterials.HasValue)
+                importer.materialImportMode = importMaterials.Value
+                    ? ModelImporterMaterialImportMode.ImportStandard
+                    : ModelImporterMaterialImportMode.None;
+            if (globalScale.HasValue) importer.globalScale = globalScale.Value;
+
+            importer.SaveAndReimport();
+            return MCPResult.Success();
+        }
+
+        [MCPTool("create_folder", "Creates a folder under Assets/, creating any missing parent folders along the way (each as its own real folder asset with a .meta file, via AssetDatabase, not a raw filesystem directory).", group: "assets")]
+        public static MCPResult CreateFolder(
+            MCPToolContext ctx,
+            [MCPParam("Path relative to Assets/ for the new folder, e.g. 'Prefabs/Enemies'.")] string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return MCPResult.Fail("path must not be empty.");
+
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, path, out var fullPath, out var guardError))
+                return MCPResult.Fail(guardError);
+
+            if (Directory.Exists(fullPath))
+                return MCPResult.Fail($"'{path}' already exists.");
+
+            var segments = path.Replace('\\', '/').Trim('/').Split('/');
+            var currentAssetPath = "Assets";
+            foreach (var segment in segments)
+            {
+                var candidate = currentAssetPath + "/" + segment;
+                if (!AssetDatabase.IsValidFolder(candidate))
+                {
+                    var guid = AssetDatabase.CreateFolder(currentAssetPath, segment);
+                    if (string.IsNullOrEmpty(guid))
+                        return MCPResult.Fail($"Failed to create folder '{candidate}'.");
+                }
+                currentAssetPath = candidate;
+            }
+
+            return MCPResult.Success(new { path = currentAssetPath });
+        }
+
+        [MCPTool("create_render_texture", "Creates a new RenderTexture asset, for camera-to-texture setups (CCTV/monitor props, minimaps, portals).", group: "assets")]
+        public static MCPResult CreateRenderTexture(
+            MCPToolContext ctx,
+            [MCPParam("Destination path relative to Assets/, e.g. 'Textures/CCTV.renderTexture'.")] string assetPath,
+            [MCPParam("Width in pixels. Defaults to 1024.")] int width = 1024,
+            [MCPParam("Height in pixels. Defaults to 1024.")] int height = 1024,
+            [MCPParam("Depth buffer bits: 0, 16, 24, or 32. Defaults to 24.")] int depthBufferBits = 24)
+        {
+            if (!assetPath.EndsWith(".renderTexture", StringComparison.OrdinalIgnoreCase))
+                return MCPResult.Fail("assetPath must end with '.renderTexture'.");
+
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, assetPath, out var fullPath, out var guardError))
+                return MCPResult.Fail(guardError);
+
+            if (File.Exists(fullPath))
+                return MCPResult.Fail($"'{assetPath}' already exists.");
+
+            var renderTexture = new RenderTexture(width, height, depthBufferBits);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath));
+            var unityAssetPath = "Assets/" + assetPath.Replace('\\', '/').TrimStart('/');
+            AssetDatabase.CreateAsset(renderTexture, unityAssetPath);
+
+            return MCPResult.Success(new { assetPath = unityAssetPath });
+        }
+
+        [MCPTool(
+            "mark_addressable",
+            "Marks an asset as Addressable and optionally assigns it to a named group. Requires the Addressables " +
+            "package (com.unity.addressables) to be installed and initialized in this project; fails with a clear " +
+            "message if it isn't. Accessed via reflection since Addressables is an optional package this tool " +
+            "assembly can't take a hard compile-time dependency on -- verify with a real project that has Addressables " +
+            "set up before relying on this.",
+            group: "assets")]
+        public static MCPResult MarkAddressable(
+            MCPToolContext ctx,
+            [MCPParam("Path relative to Assets/ of the asset to mark addressable.")] string assetPath,
+            [MCPParam("Name of an existing Addressable group to assign it to. Omit to use the default group.")] string groupName = null)
+        {
+            if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, assetPath, out var fullPath, out var guardError))
+                return MCPResult.Fail(guardError);
+
+            if (!File.Exists(fullPath) && !Directory.Exists(fullPath))
+                return MCPResult.Fail($"'{assetPath}' does not exist.");
+
+            var unityAssetPath = "Assets/" + assetPath.Replace('\\', '/').TrimStart('/');
+            var guid = AssetDatabase.AssetPathToGUID(unityAssetPath);
+            if (string.IsNullOrEmpty(guid))
+                return MCPResult.Fail($"Could not resolve a GUID for '{assetPath}'.");
+
+            var settingsObjType = FindTypeByFullName("UnityEditor.AddressableAssets.Settings.AddressableAssetSettingsDefaultObject");
+            if (settingsObjType == null)
+                return MCPResult.Fail("The Addressables package (com.unity.addressables) is not installed in this project.");
+
+            try
+            {
+                var settings = settingsObjType.GetProperty("Settings", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                if (settings == null)
+                    return MCPResult.Fail("Addressables Settings asset not found -- initialize Addressables first (Window > Asset Management > Addressables > Groups).");
+
+                object targetGroup;
+                if (!string.IsNullOrEmpty(groupName))
+                {
+                    targetGroup = settings.GetType().GetMethod("FindGroup", new[] { typeof(string) })?.Invoke(settings, new object[] { groupName });
+                    if (targetGroup == null)
+                        return MCPResult.Fail($"Addressable group '{groupName}' not found.");
+                }
+                else
+                {
+                    targetGroup = settings.GetType().GetProperty("DefaultGroup")?.GetValue(settings);
+                    if (targetGroup == null)
+                        return MCPResult.Fail("No default Addressable group is configured.");
+                }
+
+                var createOrMoveEntry = settings.GetType().GetMethod("CreateOrMoveEntry", new[] { typeof(string), targetGroup.GetType(), typeof(bool), typeof(bool) });
+                if (createOrMoveEntry == null)
+                    return MCPResult.Fail("Could not find AddressableAssetSettings.CreateOrMoveEntry on this Addressables version.");
+
+                var entry = createOrMoveEntry.Invoke(settings, new object[] { guid, targetGroup, false, true });
+                if (entry == null)
+                    return MCPResult.Fail("CreateOrMoveEntry did not return an entry -- the asset may not be addressable-eligible.");
+
+                return MCPResult.Success(new { assetPath = unityAssetPath, group = groupName ?? "(default)" });
+            }
+            catch (Exception e)
+            {
+                return MCPResult.Fail($"Addressables reflection call failed (package version mismatch?): {e.Message}");
+            }
+        }
+
+        [MCPTool(
+            "create_asset_bundle",
+            "Assigns one or more assets to a named AssetBundle, then builds all asset bundles for the current build " +
+            "target into outputFolder (relative to the project root, NOT Assets/ -- bundle output conventionally lives " +
+            "outside Assets/ so the bundles themselves aren't reimported as assets).",
+            MCPLatencyTier.Slow,
+            group: "assets")]
+        public static MCPResult CreateAssetBundle(
+            MCPToolContext ctx,
+            [MCPParam("Asset paths relative to Assets/ to include in the bundle.")] string[] assetPaths,
+            [MCPParam("Bundle name, e.g. 'enemies'. Created if it doesn't already exist.")] string bundleName,
+            [MCPParam("Output folder for the built bundles, relative to the project root, e.g. 'AssetBundles'.")] string outputFolder,
+            [MCPParam("Optional variant name for the bundle, e.g. 'hd'/'sd'. Omit for none.")] string variant = "")
+        {
+            if (assetPaths == null || assetPaths.Length == 0)
+                return MCPResult.Fail("assetPaths must contain at least one entry.");
+
+            if (string.IsNullOrWhiteSpace(bundleName))
+                return MCPResult.Fail("bundleName must not be empty.");
+
+            foreach (var assetPath in assetPaths)
+            {
+                if (!MCPPathGuard.TryResolveWithinAssets(MCPProjectUtil.ProjectRoot, assetPath, out var fullPath, out var guardError))
+                    return MCPResult.Fail(guardError);
+
+                if (!File.Exists(fullPath))
+                    return MCPResult.Fail($"'{assetPath}' does not exist.");
+
+                var unityAssetPath = "Assets/" + assetPath.Replace('\\', '/').TrimStart('/');
+                var importer = AssetImporter.GetAtPath(unityAssetPath);
+                if (importer == null)
+                    return MCPResult.Fail($"Could not get an importer for '{assetPath}'.");
+
+                importer.SetAssetBundleNameAndVariant(bundleName, variant ?? "");
+            }
+
+            var normalizedRoot = Path.GetFullPath(MCPProjectUtil.ProjectRoot);
+            var normalizedOutput = Path.GetFullPath(Path.Combine(MCPProjectUtil.ProjectRoot, outputFolder));
+            if (!normalizedOutput.StartsWith(normalizedRoot, StringComparison.Ordinal))
+                return MCPResult.Fail("outputFolder must be within the project.");
+
+            Directory.CreateDirectory(normalizedOutput);
+            var manifest = BuildPipeline.BuildAssetBundles(normalizedOutput, BuildAssetBundleOptions.None, EditorUserBuildSettings.activeBuildTarget);
+            if (manifest == null)
+                return MCPResult.Fail("BuildPipeline.BuildAssetBundles failed -- check the Console for details.");
+
+            return MCPResult.Success(new
+            {
+                outputFolder,
+                bundleName,
+                assetCount = assetPaths.Length,
+                allBundles = manifest.GetAllAssetBundles()
+            });
+        }
+
+        private static Type FindTypeByFullName(string fullName)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = asm.GetTypes(); } catch { continue; }
+                var match = types.FirstOrDefault(t => t.FullName == fullName);
+                if (match != null) return match;
+            }
+            return null;
         }
     }
 }

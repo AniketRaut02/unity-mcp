@@ -13,7 +13,7 @@ namespace UnityMCP.Tools
             "get_hierarchy",
             "Returns the full GameObject hierarchy of the active scene as a nested tree. Cached and invalidated on " +
             "structural scene changes (create/delete/reparent) -- repeated calls between such changes are effectively " +
-            "free.")]
+            "free.", readOnly: true)]
         public static MCPResult GetHierarchy(MCPToolContext ctx)
         {
             var data = MCPHierarchyCache.GetOrBuild(BuildHierarchyData);
@@ -42,14 +42,14 @@ namespace UnityMCP.Tools
             };
         }
 
-        [MCPTool("get_selected_object", "Returns the hierarchy path of the currently selected GameObject in the Editor, or null if nothing is selected.")]
+        [MCPTool("get_selected_object", "Returns the hierarchy path of the currently selected GameObject in the Editor, or null if nothing is selected.", readOnly: true)]
         public static MCPResult GetSelectedObject(MCPToolContext ctx)
         {
             var selected = Selection.activeGameObject;
             return MCPResult.Success(new { path = selected != null ? MCPSceneUtil.GetPath(selected) : null });
         }
 
-        [MCPTool("get_console_logs", "Returns the most recent N Unity console log entries captured since the Editor last started.", MCPLatencyTier.Fast)]
+        [MCPTool("get_console_logs", "Returns the most recent N Unity console log entries captured since the Editor last started.", MCPLatencyTier.Fast, readOnly: true)]
         public static MCPResult GetConsoleLogs(
             MCPToolContext ctx,
             [MCPParam("How many of the most recent log entries to return.")] int count = 50)
@@ -58,7 +58,7 @@ namespace UnityMCP.Tools
             return MCPResult.Success(new { logs });
         }
 
-        [MCPTool("get_project_info", "Returns basic project metadata: Unity version, active scene name/path, and build target.")]
+        [MCPTool("get_project_info", "Returns basic project metadata: Unity version, active scene name/path, and build target.", readOnly: true)]
         public static MCPResult GetProjectInfo(MCPToolContext ctx)
         {
             return MCPResult.Success(new

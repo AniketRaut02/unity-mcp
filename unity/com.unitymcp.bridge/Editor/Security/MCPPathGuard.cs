@@ -30,44 +30,73 @@ namespace UnityMCP.Security
         /// <param name="relativeAssetPath">A path relative to Assets/, e.g. "Prefabs/Enemy.prefab".</param>
         public static bool TryResolveWithinAssets(string projectRoot, string relativeAssetPath, out string fullPath, out string error)
         {
+            string assetsRoot;
+            try { assetsRoot = Path.GetFullPath(Path.Combine(projectRoot, "Assets")); }
+            catch (Exception e)
+            {
+                fullPath = null;
+                error = $"Could not resolve path: {e.Message}";
+                return false;
+            }
+            return TryResolveWithinRoot(assetsRoot, relativeAssetPath, "Assets/", out fullPath, out error);
+        }
+
+        /// <summary>
+        /// Same confinement/symlink-safety guarantees as <see cref="TryResolveWithinAssets"/>, but confines to the
+        /// whole project root instead of just Assets/ -- for tools whose output legitimately lives outside Assets/
+        /// (e.g. build_player's player build output), where confining to Assets/ would be wrong, but leaving the
+        /// path unconfined would let a build write anywhere on disk.
+        /// </summary>
+        /// <param name="projectRoot">The folder containing Assets/ (one level above Assets/).</param>
+        /// <param name="relativeProjectPath">A path relative to the project root, e.g. "Builds/Windows/Game.exe".</param>
+        public static bool TryResolveWithinProject(string projectRoot, string relativeProjectPath, out string fullPath, out string error)
+        {
+            string root;
+            try { root = Path.GetFullPath(projectRoot); }
+            catch (Exception e)
+            {
+                fullPath = null;
+                error = $"Could not resolve path: {e.Message}";
+                return false;
+            }
+            return TryResolveWithinRoot(root, relativeProjectPath, "the project root", out fullPath, out error);
+        }
+
+        private static bool TryResolveWithinRoot(string root, string relativePath, string rootDescription, out string fullPath, out string error)
+        {
             fullPath = null;
             error = null;
 
-            if (string.IsNullOrWhiteSpace(relativeAssetPath))
+            if (string.IsNullOrWhiteSpace(relativePath))
             {
                 error = "Path must not be empty.";
                 return false;
             }
 
-            if (Path.IsPathRooted(relativeAssetPath))
+            if (Path.IsPathRooted(relativePath))
             {
-                error = "Absolute paths are not allowed — provide a path relative to Assets/ (e.g. 'Prefabs/Enemy.prefab').";
+                error = $"Absolute paths are not allowed — provide a path relative to {rootDescription} (e.g. 'Prefabs/Enemy.prefab').";
                 return false;
             }
 
-            string assetsRoot;
             string candidate;
-            try
-            {
-                assetsRoot = Path.GetFullPath(Path.Combine(projectRoot, "Assets"));
-                candidate = Path.GetFullPath(Path.Combine(assetsRoot, relativeAssetPath));
-            }
+            try { candidate = Path.GetFullPath(Path.Combine(root, relativePath)); }
             catch (Exception e)
             {
                 error = $"Could not resolve path: {e.Message}";
                 return false;
             }
 
-            bool withinAssets = candidate.Equals(assetsRoot, StringComparison.Ordinal)
-                || candidate.StartsWith(assetsRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+            bool withinRoot = candidate.Equals(root, StringComparison.Ordinal)
+                || candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
 
-            if (!withinAssets)
+            if (!withinRoot)
             {
-                error = $"Path '{relativeAssetPath}' resolves outside Assets/ and is not allowed.";
+                error = $"Path '{relativePath}' resolves outside {rootDescription} and is not allowed.";
                 return false;
             }
 
-            if (!TryCheckNoReparsePoints(assetsRoot, candidate, out var reparseError))
+            if (!TryCheckNoReparsePoints(root, candidate, out var reparseError))
             {
                 error = reparseError;
                 return false;

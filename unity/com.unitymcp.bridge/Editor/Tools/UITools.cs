@@ -194,7 +194,7 @@ namespace UnityMCP.Tools
             return MCPResult.Success(RectTransformStateAnon(rt));
         }
 
-        [MCPTool("get_rect_transform", "Reads back anchorMin/anchorMax/pivot/anchoredPosition/sizeDelta for a UI element by path.", group: "ui")]
+        [MCPTool("get_rect_transform", "Reads back anchorMin/anchorMax/pivot/anchoredPosition/sizeDelta for a UI element by path.", group: "ui", readOnly: true)]
         public static MCPResult GetRectTransform(
             MCPToolContext ctx,
             [MCPParam("Hierarchy path of the target UI element.")] string path)

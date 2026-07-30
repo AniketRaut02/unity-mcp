@@ -94,14 +94,6 @@ weapons, terrain, animation, …) is opt-in per session via the `manage_tools` t
 assistant's context stays focused on what the current task actually needs instead of 312
 tool definitions at once.
 
-### 🏗️ Visual Tool Builder — tools that build tools
-
-`Window → Unity MCP → Tool Builder` lets you chain existing tools into a brand-new composite
-tool entirely from a form: pick steps, wire arguments (literal values, `{paramName}`
-references, or `{stepN.field}` to pull from an earlier step's result), name it, generate.
-Validation runs against the **live tool registry** — real tools, real parameters, right now,
-not a stale static list.
-
 ### 🔌 Two transports, your choice
 
 - **stdio** (default) — what Claude Code and Codex expect out of the box, zero extra setup.

@@ -186,7 +186,8 @@ namespace UnityMCP.Tools
             [MCPParam("Whether to bake ambient occlusion into lightmaps. Omit to leave unchanged.")] bool? ao = null,
             [MCPParam("AO max sample distance in meters. Omit to leave unchanged.")] float? aoMaxDistance = null,
             [MCPParam("Denoiser to apply to direct/indirect/AO lightmap channels uniformly (Progressive lightmappers only). Omit to leave unchanged.")] UnityEngine.LightingSettings.DenoiserType? denoiser = null,
-            [MCPParam("Whether to compress baked lightmap textures. Omit to leave unchanged.")] bool? compressLightmaps = null)
+            [MCPParam("Whether to compress baked lightmap textures. true maps to NormalQuality, false to None. Omit to leave unchanged. Prefer lightmapCompression for finer control.")] bool? compressLightmaps = null,
+            [MCPParam("Baked lightmap compression quality: None, LowQuality, NormalQuality, or HighQuality. Takes precedence over compressLightmaps if both are given. Omit to leave unchanged.")] UnityEngine.LightmapCompression? lightmapCompression = null)
         {
             var settings = GetOrCreateLightingSettings();
 
@@ -198,9 +199,14 @@ namespace UnityMCP.Tools
             if (indirectResolution.HasValue) settings.indirectResolution = indirectResolution.Value;
             if (ao.HasValue) settings.ao = ao.Value;
             if (aoMaxDistance.HasValue) settings.aoMaxDistance = aoMaxDistance.Value;
-#pragma warning disable CS0618 // compressLightmaps is obsolete in favor of lightmapCompression, but that enum's values aren't verified against this Unity version -- keeping the simple bool API rather than guessing.
-            if (compressLightmaps.HasValue) settings.compressLightmaps = compressLightmaps.Value;
-#pragma warning restore CS0618
+            // The old bool `compressLightmaps` setter is deprecated in favor of the graded
+            // `lightmapCompression` enum. The bool parameter is kept so existing callers keep
+            // working, mapped onto the enum's endpoints; an explicit lightmapCompression wins.
+            if (compressLightmaps.HasValue)
+                settings.lightmapCompression = compressLightmaps.Value
+                    ? UnityEngine.LightmapCompression.NormalQuality
+                    : UnityEngine.LightmapCompression.None;
+            if (lightmapCompression.HasValue) settings.lightmapCompression = lightmapCompression.Value;
             if (denoiser.HasValue)
             {
                 settings.denoiserTypeDirect = denoiser.Value;

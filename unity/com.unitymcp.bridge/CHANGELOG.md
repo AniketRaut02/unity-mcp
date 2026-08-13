@@ -4,6 +4,72 @@ All notable changes to this package are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.28.0] — Target Unity 6, migrate NavMesh tools to the AI Navigation package
+
+Follow-up to 1.27.1: with the package compiling again, the Console's remaining CS0618
+warnings were all deprecated-API calls. Rather than suppress them, the NavMesh tools now
+use the modern components.
+
+### Changed
+- **Minimum Unity version is now 6000.0 (Unity 6)**, declared in `package.json`. The
+  previously declared floor of 2021.3 was already inaccurate -- `PhysicsTools.cs` uses
+  `Rigidbody.linearDamping`/`angularDamping`, which are Unity 6-only, so the package could
+  not have compiled on 2021.3 for some time.
+- **New dependency: `com.unity.ai.navigation` (2.0.0+)**, added to `package.json` and
+  referenced from `UnityMCP.Editor.asmdef` as `Unity.AI.Navigation`. This is the package
+  Unity moved the high-level navigation components into; the legacy APIs below are all
+  deprecated in its favor.
+- `bake_navmesh` now bakes via `NavMeshSurface` instead of the deprecated
+  `UnityEditor.AI.NavMeshBuilder.BuildNavMesh()`. It bakes every `NavMeshSurface` already in
+  the scene; if there are none it creates a single one with `CollectObjects.All`, which
+  reproduces the old scene-wide behavior. Because `NavMeshSurface.BuildNavMesh()` builds
+  into memory only, the result is now explicitly written out as an asset beside the scene
+  (`<scene folder>/<scene name>/NavMesh-<surface name>.asset`, matching where Unity's own
+  Navigation window puts it) -- without that the bake would silently vanish on scene reload.
+  Returns `surfacesBaked` and `createdSurface` alongside the existing vertex/triangle counts.
+- `create_offmesh_link` now creates a `NavMeshLink` instead of the deprecated `OffMeshLink`.
+  Note the modern component renamed two members (`biDirectional` -> `bidirectional`,
+  `costOverride` -> `costModifier`); the tool's own parameter names are deliberately
+  unchanged so existing callers and workflows keep working. New optional `width` parameter,
+  which `NavMeshLink` supports and `OffMeshLink` did not. The default GameObject name is now
+  `NavMeshLink` rather than `OffMeshLink`.
+- `mark_navmesh_area` now adds a `NavMeshModifier` instead of calling the deprecated
+  `GameObjectUtility.SetNavMeshArea` per GameObject. `NavMeshModifier.applyToChildren` maps
+  directly onto the tool's existing `includeChildren` parameter, so one component now covers
+  a whole subtree where the old code wrote a flag onto every child individually. Re-calling
+  on the same GameObject updates that component rather than stacking duplicates.
+- The tool names `bake_navmesh`, `create_offmesh_link`, and `mark_navmesh_area` are all
+  unchanged, so `docs/tool-catalog.md` entries and Python workflows referencing them keep
+  working.
+
+- `configure_lightmap_settings` now writes `LightingSettings.lightmapCompression` instead of
+  the deprecated `compressLightmaps` bool, removing the last suppressed CS0618 in the tool
+  layer. The old `compressLightmaps` parameter still works and maps onto the enum's endpoints
+  (`true` -> `NormalQuality`, `false` -> `None`); a new optional `lightmapCompression`
+  parameter exposes the full `None`/`LowQuality`/`NormalQuality`/`HighQuality` range and wins
+  if both are supplied.
+
+### Unchanged, deliberately
+- `bake_navmesh_volume` still uses the runtime `UnityEngine.AI.NavMeshBuilder`
+  (`BuildNavMeshData`/`CollectSources`). That API is *not* deprecated -- it's the same
+  mechanism `NavMeshSurface` is built on -- and unlike the surface component it takes an
+  explicit `NavMeshBuildSettings` by value, which is what lets this tool genuinely honor
+  per-call agent radius/height/slope/step.
+- `NavMeshAgent`, `NavMeshObstacle`, and the `NavMesh.*` query APIs used by
+  `add_navmesh_agent`, `add_navmesh_obstacle`, `sample_navmesh`, and `define_navmesh_area`
+  are all current, and were left alone.
+- `MCPTestRunnerCache`'s `TestRunnerApi.RetrieveTestList` suppression stays. Unlike the
+  others, this one is deprecated by the *Test Framework package* version, which users upgrade
+  independently of the Editor, so the suppression is still buying real compatibility rather
+  than hiding a Unity-version problem.
+
+### Fixed
+- `package.json`'s `documentationUrl`/`changelogUrl`/`licensesUrl` were literal `TODO:`
+  placeholder strings rather than URLs; they now point at the GitHub repo, so the Package
+  Manager's Documentation/Changelog/License links work.
+- `package.json`'s description still advertised "40 atomic Editor tools"; updated to the
+  actual 312 across 26 groups.
+
 ## [1.27.1] — Fix a real compile error blocking the package on current Unity versions
 
 `get_render_stats` (`ProfilingTools.cs`) referenced `UnityStats.batches`, which doesn't

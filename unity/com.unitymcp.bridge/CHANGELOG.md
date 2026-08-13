@@ -4,6 +4,29 @@ All notable changes to this package are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.27.1] — Fix a real compile error blocking the package on current Unity versions
+
+`get_render_stats` (`ProfilingTools.cs`) referenced `UnityStats.batches`, which doesn't
+exist -- `UnityStats` only ever exposed the per-technique counts. This was a hard CS0117
+compile error, so it broke the whole `UnityMCP.Editor` assembly (every tool, not just
+profiling) regardless of install method -- Package Manager "Add from disk" and "Add from
+git URL" both pull the same source, so both looked "broken" for the same underlying
+reason.
+
+### Fixed
+- `get_render_stats`'s `batches` now sums `UnityStats.dynamicBatches +
+  UnityStats.staticBatches + UnityStats.instancedBatches` (verified against
+  `UnityStats.bindings.cs`), fixing the CS0117 error.
+- Cleaned up the CS0618 obsolete-API warnings the Console also showed:
+  `find_gameobjects` now uses `Object.FindObjectsByType` instead of the obsolete
+  `FindObjectsOfType`; `UITools.EnsureEventSystem` now uses `FindFirstObjectByType`;
+  `create_offmesh_link` and `mark_navmesh_area` wrap their still-necessary-but-obsolete
+  `OffMeshLink`/`GameObjectUtility.SetNavMeshArea` calls in `#pragma warning disable
+  CS0618` (same pattern already used elsewhere in this codebase for
+  `LightingTools.cs`/`MCPTestRunnerCache.cs`), since the non-obsolete replacements live in
+  the optional `com.unity.ai.navigation` package, which this package intentionally
+  doesn't depend on.
+
 ## [1.27.0] — Tool Groups window: simplified descriptions, at-a-glance counters, live active state
 
 Usability pass on the Tool Groups window based on real feedback: the AI-facing tool

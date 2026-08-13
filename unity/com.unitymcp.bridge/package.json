@@ -1,6 +1,6 @@
 {
   "name": "com.darkpixelgd.unitymcpbridge",
-  "version": "1.27.0",
+  "version": "1.27.1",
   "displayName": "Unity MCP Bridge",
   "description": "A Model Context Protocol (MCP) bridge for the Unity Editor. Exposes 40 atomic Editor tools (Scene, Component, Query, Scripting, Physics, Assets, UI) plus a composite/workflow layer to any MCP client (Claude Code, Codex, and others) over stdio or streamable HTTP. Includes an in-Editor Setup window for one-click, color-coded client configuration with configuration history.",
   "unity": "2021.3",

@@ -133,7 +133,7 @@ namespace UnityMCP.Tools
         {
             GameObject[] candidates = !string.IsNullOrEmpty(tag)
                 ? GameObject.FindGameObjectsWithTag(tag)
-                : UnityEngine.Object.FindObjectsOfType<GameObject>();
+                : UnityEngine.Object.FindObjectsByType<GameObject>(FindObjectsSortMode.None);
 
             var matches = new List<string>();
             foreach (var go in candidates)

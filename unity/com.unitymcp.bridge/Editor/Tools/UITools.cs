@@ -300,10 +300,7 @@ namespace UnityMCP.Tools
 
         private static void EnsureEventSystem()
         {
-            // FindObjectOfType is the obsolete-but-functional name on newer Unity versions
-            // (FindFirstObjectByType is the current recommendation) — same caveat as
-            // Rigidbody.drag elsewhere in this codebase; swap if your Editor warns about it.
-            if (Object.FindObjectOfType<UnityEngine.EventSystems.EventSystem>() != null) return;
+            if (Object.FindFirstObjectByType<UnityEngine.EventSystems.EventSystem>() != null) return;
 
             var go = new GameObject("EventSystem");
             Undo.RegisterCreatedObjectUndo(go, "MCP: Create EventSystem");

@@ -145,6 +145,11 @@ Let Unity finish compiling. Check the Console — you should see:
 [MCP] 312 tool(s) registered
 ```
 
+> If the Console instead shows red compile errors, the bridge won't start at all —
+> this applies identically whether you installed via disk, Git URL, or manual copy,
+> since all three pull the same source. Fix (or report) the compile error first;
+> yellow obsolete-API warnings are harmless and safe to ignore.
+
 ### 2. Set up the Python MCP server
 
 Clone this repo if you haven't already, then set up the server the bridge talks to.

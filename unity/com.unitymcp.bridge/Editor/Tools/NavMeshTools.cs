@@ -226,8 +226,13 @@ namespace UnityMCP.Tools
             link.startTransform = startGo.transform;
             link.endTransform = endGo.transform;
             link.biDirectional = biDirectional;
+            // OffMeshLink itself is obsolete in favor of the optional com.unity.ai.navigation
+            // package's NavMeshLink, but that package isn't a dependency of this one (which
+            // targets core Unity 2021.3+ only) -- OffMeshLink remains the only built-in API.
+#pragma warning disable CS0618
             link.costOverride = costOverride;
             link.activated = activated;
+#pragma warning restore CS0618
 
             return MCPResult.Success(new { path = MCPSceneUtil.GetPath(go) });
         }
@@ -295,6 +300,11 @@ namespace UnityMCP.Tools
             int area = NavMesh.GetAreaFromName(areaName);
             if (area < 0) return MCPResult.Fail($"NavMesh area '{areaName}' does not exist.");
 
+            // GameObjectUtility.SetNavMeshArea is obsolete in favor of the optional
+            // com.unity.ai.navigation package's NavMeshModifier, but that package isn't a
+            // dependency of this one (which targets core Unity 2021.3+ only) -- this remains
+            // the only built-in API for tagging a GameObject's static NavMesh area.
+#pragma warning disable CS0618
             int count = 0;
             if (includeChildren)
             {
@@ -309,6 +319,7 @@ namespace UnityMCP.Tools
                 GameObjectUtility.SetNavMeshArea(go, area);
                 count = 1;
             }
+#pragma warning restore CS0618
 
             return MCPResult.Success(new { areaName, areaIndex = area, gameObjectsMarked = count });
         }

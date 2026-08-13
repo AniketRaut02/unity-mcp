@@ -111,7 +111,7 @@ namespace UnityMCP.Tools
         {
             return MCPResult.Success(new
             {
-                batches = UnityStats.batches,
+                batches = UnityStats.dynamicBatches + UnityStats.staticBatches + UnityStats.instancedBatches,
                 drawCalls = UnityStats.drawCalls,
                 dynamicBatchedDrawCalls = UnityStats.dynamicBatchedDrawCalls,
                 staticBatchedDrawCalls = UnityStats.staticBatchedDrawCalls,

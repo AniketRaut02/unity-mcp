@@ -1,9 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using Unity.AI.Navigation;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.AI;
+using UnityEngine.SceneManagement;
 using UnityMCP;
 
 namespace UnityMCP.Tools
@@ -21,40 +25,106 @@ namespace UnityMCP.Tools
     ///      non-public internal API to persist this. So configure_navmesh_settings below stores its values as
     ///      this MCP server's own session defaults (used by bake_navmesh_volume), not as a real edit to Unity's
     ///      built-in agent type registry.
-    ///   2. UnityEditor.AI.NavMeshBuilder.BuildNavMesh() (the simple, scene-wide bake used by bake_navmesh) requires
-    ///      the active scene to already be saved to disk -- same requirement LightingTools.cs's bake_lightmaps
-    ///      found for lightmap baking, confirmed by the exact same kind of live spike.
+    ///   2. Baking requires the active scene to already be saved to disk -- same requirement LightingTools.cs's
+    ///      bake_lightmaps found for lightmap baking, confirmed by the exact same kind of live spike. Here it's
+    ///      also a practical one: the baked NavMeshData is written as an asset next to the scene file.
     ///
-    /// bake_navmesh_volume instead uses the RUNTIME UnityEngine.AI.NavMeshBuilder.BuildNavMeshData() (which takes an
-    /// explicit NavMeshBuildSettings by value, so custom radius/height/slope/step genuinely do apply -- there's no
-    /// registry-lookup indirection here, just a normal parameter) + NavMesh.AddNavMeshData(), which is exactly the
-    /// mechanism Unity's own NavMeshSurface component (from the optional com.unity.ai.navigation package) is built
-    /// on -- this gives real local/procedural NavMesh generation using only core Unity, no optional package needed.
+    /// As of package 1.28.0 the scene-authoring tools here target the com.unity.ai.navigation package
+    /// (Unity.AI.Navigation): bake_navmesh drives NavMeshSurface, create_offmesh_link creates a NavMeshLink, and
+    /// mark_navmesh_area adds a NavMeshModifier. The legacy equivalents they replaced (UnityEditor.AI.NavMeshBuilder,
+    /// OffMeshLink, GameObjectUtility.SetNavMeshArea) are all deprecated in Unity 6 and emit CS0618.
+    ///
+    /// bake_navmesh_volume is the exception and deliberately still uses the RUNTIME
+    /// UnityEngine.AI.NavMeshBuilder.BuildNavMeshData() -- that API is NOT deprecated (it's the same mechanism
+    /// NavMeshSurface itself is built on), and it takes an explicit NavMeshBuildSettings by value, so custom
+    /// radius/height/slope/step genuinely do apply per call, with no registry-lookup indirection.
     /// </summary>
     public static class NavMeshTools
     {
         [MCPTool(
             "bake_navmesh",
-            "Bakes the navigation mesh for the whole active scene using Unity's built-in Navigation window " +
-            "settings (agent type 0/Humanoid by default). Requires the active scene to already be saved.",
+            "Bakes the navigation mesh for the active scene via the AI Navigation package's NavMeshSurface " +
+            "components. Bakes every NavMeshSurface already in the scene; if the scene has none, creates a single " +
+            "one collecting all objects, which reproduces the old scene-wide bake. The baked NavMeshData is saved " +
+            "as an asset next to the scene file, so the active scene must already be saved.",
             group: "navmesh", latencyTier: MCPLatencyTier.Slow)]
         public static MCPResult BakeNavMesh(MCPToolContext ctx)
         {
-            var activeScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            var activeScene = SceneManager.GetActiveScene();
             if (string.IsNullOrEmpty(activeScene.path))
-                return MCPResult.Fail("The active scene hasn't been saved yet. Call save_scene (or create_scene) first -- Unity requires a saved scene before it will bake a NavMesh.");
+                return MCPResult.Fail("The active scene hasn't been saved yet. Call save_scene (or create_scene) first -- the baked NavMesh is written as an asset next to the scene file, so Unity needs a saved scene.");
 
-            try
+            var surfaces = UnityEngine.Object.FindObjectsByType<NavMeshSurface>(FindObjectsSortMode.None);
+            bool createdSurface = false;
+
+            if (surfaces.Length == 0)
             {
-                UnityEditor.AI.NavMeshBuilder.BuildNavMesh();
+                var surfaceGo = new GameObject("NavMesh Surface");
+                Undo.RegisterCreatedObjectUndo(surfaceGo, "MCP: Create NavMesh Surface");
+                var surface = Undo.AddComponent<NavMeshSurface>(surfaceGo);
+                surface.collectObjects = CollectObjects.All;
+                surfaces = new[] { surface };
+                createdSurface = true;
             }
-            catch (Exception e)
+
+            var baked = new List<string>();
+            foreach (var surface in surfaces)
             {
-                return MCPResult.Fail($"NavMeshBuilder.BuildNavMesh() threw: {e.Message}");
+                try
+                {
+                    surface.BuildNavMesh();
+                }
+                catch (Exception e)
+                {
+                    return MCPResult.Fail($"NavMeshSurface.BuildNavMesh() threw on '{MCPSceneUtil.GetPath(surface.gameObject)}': {e.Message}");
+                }
+
+                PersistNavMeshData(surface, activeScene);
+                baked.Add(MCPSceneUtil.GetPath(surface.gameObject));
             }
+
+            AssetDatabase.SaveAssets();
+            EditorSceneManager.MarkSceneDirty(activeScene);
 
             var triangulation = NavMesh.CalculateTriangulation();
-            return MCPResult.Success(new { vertexCount = triangulation.vertices.Length, triangleCount = triangulation.indices.Length / 3 });
+            return MCPResult.Success(new
+            {
+                surfacesBaked = baked,
+                createdSurface,
+                vertexCount = triangulation.vertices.Length,
+                triangleCount = triangulation.indices.Length / 3,
+            });
+        }
+
+        /// <summary>
+        /// Writes a freshly baked surface's NavMeshData to disk if it's still an in-memory object. NavMeshSurface
+        /// builds into memory; without this the bake is lost on scene reload, since a scene can only reference
+        /// NavMeshData that exists as an asset. Mirrors where Unity's own Navigation window puts it:
+        /// &lt;scene folder&gt;/&lt;scene name&gt;/NavMesh-&lt;surface name&gt;.asset.
+        /// </summary>
+        private static void PersistNavMeshData(NavMeshSurface surface, Scene scene)
+        {
+            var data = surface.navMeshData;
+            if (data == null) return;
+
+            if (AssetDatabase.Contains(data))
+            {
+                EditorUtility.SetDirty(data);
+                return;
+            }
+
+            var sceneFolder = Path.Combine(
+                Path.GetDirectoryName(scene.path) ?? "Assets",
+                Path.GetFileNameWithoutExtension(scene.path)).Replace('\\', '/');
+            if (!Directory.Exists(sceneFolder))
+            {
+                Directory.CreateDirectory(sceneFolder);
+                AssetDatabase.Refresh();
+            }
+
+            var assetPath = AssetDatabase.GenerateUniqueAssetPath($"{sceneFolder}/NavMesh-{surface.name}.asset");
+            AssetDatabase.CreateAsset(data, assetPath);
+            EditorUtility.SetDirty(surface);
         }
 
         private static float _defaultAgentRadius = 0.5f;
@@ -198,17 +268,19 @@ namespace UnityMCP.Tools
 
         [MCPTool(
             "create_offmesh_link",
-            "Creates a new GameObject with an OffMeshLink connecting two points -- for jump/climb/vault gaps a baked " +
-            "NavMesh alone can't cross.",
+            "Creates a new GameObject with a NavMeshLink connecting two points -- for jump/climb/vault gaps a baked " +
+            "NavMesh alone can't cross. (Creates the AI Navigation package's NavMeshLink; the legacy OffMeshLink " +
+            "component it replaced is deprecated in Unity 6. The tool name is unchanged for compatibility.)",
             group: "navmesh")]
         public static MCPResult CreateOffMeshLink(
             MCPToolContext ctx,
-            [MCPParam("Name for the new GameObject. Defaults to 'OffMeshLink'.")] string name = null,
+            [MCPParam("Name for the new GameObject. Defaults to 'NavMeshLink'.")] string name = null,
             [MCPParam("Hierarchy path of the GameObject marking the link's start point.")] string startPath = null,
             [MCPParam("Hierarchy path of the GameObject marking the link's end point.")] string endPath = null,
             [MCPParam("Whether an agent can traverse the link in either direction. Defaults to true (Unity's default).")] bool biDirectional = true,
-            [MCPParam("Custom traversal cost multiplier. Omit for Unity's default (-1, meaning 'use the agent's default').")] float costOverride = -1f,
-            [MCPParam("Whether the link is enabled. Defaults to true (Unity's default).")] bool activated = true)
+            [MCPParam("Traversal cost modifier. Omit for Unity's default (-1, meaning 'use the agent's default').")] float costOverride = -1f,
+            [MCPParam("Whether the link is enabled. Defaults to true (Unity's default).")] bool activated = true,
+            [MCPParam("Width of the link in meters. Defaults to 0, meaning a single-file line between the two points.")] float width = 0f)
         {
             if (string.IsNullOrEmpty(startPath) || string.IsNullOrEmpty(endPath))
                 return MCPResult.Fail("startPath and endPath are both required.");
@@ -218,21 +290,20 @@ namespace UnityMCP.Tools
             var endGo = MCPSceneUtil.ResolvePath(endPath);
             if (endGo == null) return MCPResult.Fail($"endPath '{endPath}' not found.");
 
-            var go = new GameObject(string.IsNullOrEmpty(name) ? "OffMeshLink" : name);
-            Undo.RegisterCreatedObjectUndo(go, "MCP: Create OffMeshLink");
+            var go = new GameObject(string.IsNullOrEmpty(name) ? "NavMeshLink" : name);
+            Undo.RegisterCreatedObjectUndo(go, "MCP: Create NavMeshLink");
             go.transform.position = startGo.transform.position;
 
-            var link = go.AddComponent<OffMeshLink>();
+            var link = Undo.AddComponent<NavMeshLink>(go);
             link.startTransform = startGo.transform;
             link.endTransform = endGo.transform;
-            link.biDirectional = biDirectional;
-            // OffMeshLink itself is obsolete in favor of the optional com.unity.ai.navigation
-            // package's NavMeshLink, but that package isn't a dependency of this one (which
-            // targets core Unity 2021.3+ only) -- OffMeshLink remains the only built-in API.
-#pragma warning disable CS0618
-            link.costOverride = costOverride;
+            link.bidirectional = biDirectional;
+            link.costModifier = costOverride;
             link.activated = activated;
-#pragma warning restore CS0618
+            link.width = width;
+            // startTransform/endTransform are only resolved into the actual link endpoints on
+            // UpdateLink(); without this the link stays at its default zero-length placement.
+            link.UpdateLink();
 
             return MCPResult.Success(new { path = MCPSceneUtil.GetPath(go) });
         }
@@ -286,7 +357,10 @@ namespace UnityMCP.Tools
         [MCPTool(
             "mark_navmesh_area",
             "Sets a GameObject's NavMesh area type (used when baking, to mark e.g. slow terrain or hazards). " +
-            "Applies to children too by default, matching how area painting is normally used on a whole prop.",
+            "Applies to children too by default, matching how area painting is normally used on a whole prop. " +
+            "(Adds the AI Navigation package's NavMeshModifier; the legacy GameObjectUtility.SetNavMeshArea it " +
+            "replaced is deprecated in Unity 6. Note this now adds a component rather than setting a static flag, " +
+            "so calling it again on the same GameObject updates that component instead of stacking duplicates.)",
             group: "navmesh")]
         public static MCPResult MarkNavMeshArea(
             MCPToolContext ctx,
@@ -300,28 +374,20 @@ namespace UnityMCP.Tools
             int area = NavMesh.GetAreaFromName(areaName);
             if (area < 0) return MCPResult.Fail($"NavMesh area '{areaName}' does not exist.");
 
-            // GameObjectUtility.SetNavMeshArea is obsolete in favor of the optional
-            // com.unity.ai.navigation package's NavMeshModifier, but that package isn't a
-            // dependency of this one (which targets core Unity 2021.3+ only) -- this remains
-            // the only built-in API for tagging a GameObject's static NavMesh area.
-#pragma warning disable CS0618
-            int count = 0;
-            if (includeChildren)
-            {
-                foreach (var t in go.GetComponentsInChildren<Transform>(true))
-                {
-                    GameObjectUtility.SetNavMeshArea(t.gameObject, area);
-                    count++;
-                }
-            }
-            else
-            {
-                GameObjectUtility.SetNavMeshArea(go, area);
-                count = 1;
-            }
-#pragma warning restore CS0618
+            var modifier = go.GetComponent<NavMeshModifier>();
+            if (modifier == null) modifier = Undo.AddComponent<NavMeshModifier>(go);
+            else Undo.RecordObject(modifier, "MCP: Mark NavMesh Area");
 
-            return MCPResult.Success(new { areaName, areaIndex = area, gameObjectsMarked = count });
+            modifier.overrideArea = true;
+            modifier.area = area;
+            modifier.applyToChildren = includeChildren;
+            EditorUtility.SetDirty(modifier);
+
+            // One modifier now covers the whole subtree, so report the subtree size rather than a
+            // per-GameObject write count -- the number callers actually care about is unchanged.
+            int affected = includeChildren ? go.GetComponentsInChildren<Transform>(true).Length : 1;
+
+            return MCPResult.Success(new { areaName, areaIndex = area, gameObjectsMarked = affected, appliedToChildren = includeChildren });
         }
 
         [MCPTool("sample_navmesh", "Finds the nearest valid point on the baked NavMesh to a given world-space position.", group: "navmesh", readOnly: true)]

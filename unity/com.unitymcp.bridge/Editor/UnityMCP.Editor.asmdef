@@ -2,7 +2,8 @@
     "name": "UnityMCP.Editor",
     "rootNamespace": "UnityMCP",
     "references": [
-        "Unity.Nuget.Newtonsoft-Json"
+        "Unity.Nuget.Newtonsoft-Json",
+        "Unity.AI.Navigation"
     ],
     "includePlatforms": [
         "Editor"

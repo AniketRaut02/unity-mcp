@@ -123,14 +123,14 @@ entry for the API details confirmed along the way.
 
 | Tool | Type | Implementation | Description |
 |---|---|---|---|
-| `bake_navmesh` | A **[LOOP]**, Slow | `NavMeshTools.cs` | Bakes the NavMesh for the whole active scene using Unity's built-in Navigation window settings. Fails clearly if the scene hasn't been saved yet (a real Unity requirement, same as bake_lightmaps). |
+| `bake_navmesh` | A **[LOOP]**, Slow | `NavMeshTools.cs` | Bakes every `NavMeshSurface` in the active scene (creating one that collects all objects if the scene has none), and saves the resulting NavMeshData as an asset beside the scene. Fails clearly if the scene hasn't been saved yet (a real Unity requirement, same as bake_lightmaps). |
 | `configure_navmesh_settings` | A | `NavMeshTools.cs` | Sets this server's session-default agent radius/height/max-slope/step-height, used by bake_navmesh_volume. Unity has no public API to modify an existing agent type's settings (confirmed via reflection), so this can't affect bake_navmesh. |
 | `add_navmesh_agent` | A | `NavMeshTools.cs` | Adds and configures a NavMeshAgent (radius/height/speed/areaMask/etc). |
 | `set_agent_destination` | A **[LOOP]**, Slow | `NavMeshTools.cs` | Commands an agent toward a point; reports pathStatus, for both movement and reachability testing. |
 | `add_navmesh_obstacle` | A | `NavMeshTools.cs` | Adds and configures a NavMeshObstacle (Box/Capsule, optionally carving). |
-| `create_offmesh_link` | A | `NavMeshTools.cs` | Creates a GameObject with an OffMeshLink connecting two points, for jump/climb/vault gaps. |
+| `create_offmesh_link` | A | `NavMeshTools.cs` | Creates a GameObject with a `NavMeshLink` connecting two points, for jump/climb/vault gaps. (Tool name kept for compatibility; the legacy `OffMeshLink` component it used to create is deprecated in Unity 6.) |
 | `define_navmesh_area` | A | `NavMeshTools.cs` | Creates/updates a named NavMesh area type with a traversal cost, via `ProjectSettings/NavMeshAreas.asset`. |
-| `mark_navmesh_area` | A | `NavMeshTools.cs` | Sets a GameObject's (and by default its children's) NavMesh area type. |
+| `mark_navmesh_area` | A | `NavMeshTools.cs` | Sets a GameObject's (and by default its children's) NavMesh area type by adding a `NavMeshModifier`. Re-calling updates the existing component rather than stacking duplicates. (Replaces the deprecated `GameObjectUtility.SetNavMeshArea`.) |
 | `sample_navmesh` | A | `NavMeshTools.cs` | Finds the nearest valid NavMesh point to a world position. |
 | `bake_navmesh_volume` | A, Slow | `NavMeshTools.cs` | Bakes a local NavMesh from real scene geometry within a bounds box, via `NavMeshBuilder.BuildNavMeshData()` -- genuinely respects custom agent radius/height/slope/step per call, unlike bake_navmesh. Re-baking the same `volumeId` replaces rather than duplicates. |
 

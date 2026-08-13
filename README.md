@@ -11,7 +11,7 @@ write scripts, wire physics, build UI, light scenes, bake NavMeshes, and orchest
 gameplay systems — directly in a running Unity project, with real safety guardrails.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](unity/com.unitymcp.bridge/LICENSE.md)
-[![Unity](https://img.shields.io/badge/Unity-2021.3%2B-000000?logo=unity)](unity/com.unitymcp.bridge/package.json)
+[![Unity](https://img.shields.io/badge/Unity-6000.0%2B-000000?logo=unity)](unity/com.unitymcp.bridge/package.json)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](python/requirements.txt)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20HTTP-6E56CF)](python/unity_mcp_server/http_transport.py)
 [![Tools](https://img.shields.io/badge/tools-312%20across%2026%20groups-2E86AB)](docs/tool-catalog.md)
@@ -135,8 +135,9 @@ https://github.com/AniketRaut02/unity-mcp.git?path=/unity/com.unitymcp.bridge
 **Option C — manual copy:**
 Copy `unity/com.unitymcp.bridge/` into your project's `Packages/` folder.
 
-> Newtonsoft Json is resolved automatically as a package dependency
-> (`com.unity.nuget.newtonsoft-json`) — nothing extra to install for it.
+> Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) and AI Navigation
+> (`com.unity.ai.navigation`) are resolved automatically as package dependencies —
+> nothing extra to install for either.
 
 Let Unity finish compiling. Check the Console — you should see:
 
@@ -348,7 +349,7 @@ Found a security issue? Please open a private report rather than a public issue 
 
 ## Requirements
 
-- Unity **2021.3** or later
+- Unity **6000.0 (Unity 6)** or later
 - Python **3.10+**
 - One of: Claude Code, Codex, Cursor, Antigravity — or any other MCP-compatible client,
   pointed manually at the server

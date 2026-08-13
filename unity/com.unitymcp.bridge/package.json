@@ -1,11 +1,12 @@
 {
   "name": "com.darkpixelgd.unitymcpbridge",
-  "version": "1.27.1",
+  "version": "1.28.0",
   "displayName": "Unity MCP Bridge",
-  "description": "A Model Context Protocol (MCP) bridge for the Unity Editor. Exposes 40 atomic Editor tools (Scene, Component, Query, Scripting, Physics, Assets, UI) plus a composite/workflow layer to any MCP client (Claude Code, Codex, and others) over stdio or streamable HTTP. Includes an in-Editor Setup window for one-click, color-coded client configuration with configuration history.",
-  "unity": "2021.3",
+  "description": "A Model Context Protocol (MCP) bridge for the Unity Editor. Exposes 312 tools across 26 groups (Scene, Component, Query, Scripting, Physics, Assets, UI, Lighting, NavMesh, Terrain, and more) plus a composite/workflow layer to any MCP client (Claude Code, Codex, Cursor, Antigravity, and others) over stdio or streamable HTTP. Includes an in-Editor Setup window for one-click, color-coded client configuration with configuration history.",
+  "unity": "6000.0",
   "dependencies": {
-    "com.unity.nuget.newtonsoft-json": "3.2.1"
+    "com.unity.nuget.newtonsoft-json": "3.2.1",
+    "com.unity.ai.navigation": "2.0.0"
   },
   "keywords": [
     "mcp",
@@ -19,7 +20,7 @@
     "name": "DarkPixelGD"
   },
   "license": "SEE LICENSE IN LICENSE.md",
-  "documentationUrl": "TODO: link to README.md once hosted (e.g. a GitHub repo URL)",
-  "changelogUrl": "TODO: link to CHANGELOG.md once hosted",
-  "licensesUrl": "TODO: link to LICENSE.md once hosted"
+  "documentationUrl": "https://github.com/AniketRaut02/unity-mcp#readme",
+  "changelogUrl": "https://github.com/AniketRaut02/unity-mcp/blob/main/unity/com.unitymcp.bridge/CHANGELOG.md",
+  "licensesUrl": "https://github.com/AniketRaut02/unity-mcp/blob/main/unity/com.unitymcp.bridge/LICENSE.md"
 }

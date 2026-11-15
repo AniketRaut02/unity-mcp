@@ -1,43 +1,47 @@
 using System.Collections.Generic;
+using System.IO;
 
 namespace UnityMCP.Setup
 {
     /// <summary>
-    /// Builds the actual command/args/env every generated config entry points at —
-    /// identical across all four clients (only the file format/location differs, which
-    /// MCPMcpConfigTargets handles). Every value here is computed fresh from THIS
-    /// machine's actual state (the configured Python server location, the real Unity
-    /// project root) — nothing is a baked-in path, since this project ships to users
-    /// whose install locations won't match whoever built it.
+    /// The command/args/env every generated client config uses to start the MCP server that
+    /// ships inside this package (Server~/), identical across clients; only the file format and
+    /// location differ (MCPMcpConfigTargets). Everything is computed from this machine's real
+    /// state, nothing is baked in:
+    ///
+    ///   &lt;uv&gt; run --project &lt;package&gt;/Server~ --frozen python -m unity_mcp_server.server
+    ///
+    /// with the Python environment in &lt;project&gt;/Library/MCP/.venv (UV_PROJECT_ENVIRONMENT), so
+    /// it's per project, built from uv.lock's exact versions, re-synced by uv after a package
+    /// update, and never written inside the package folder. PYTHONPATH points at Server~
+    /// because the server runs from source (pyproject's tool.uv.package = false).
+    ///
+    /// The package folder changes on every git/OpenUPM update (PackageCache/...@hash), which is
+    /// why MCPClientConfigUpdater rewrites these entries when it moves.
     /// </summary>
     public static class MCPServerEntryBuilder
     {
-        /// <summary>
-        /// An ABSOLUTE path, not a relative one — this command is written into a config
-        /// file that some other process reads later, potentially spawning from a working
-        /// directory this code has no control over. Explicit separator characters
-        /// (matching isWindows) rather than Path.Combine, for the same reason every other
-        /// isWindows-driven path in this codebase is built that way: Path.Combine uses
-        /// the ACTUAL runtime OS's separator regardless of what isWindows says, which
-        /// makes the non-matching branch untestable on a machine running the other OS.
-        /// </summary>
-        public static string AbsoluteVenvPythonExecutable(string pythonServerPath, bool isWindows)
+        /// <summary>Main thread (PackageInfo). The bundled server folder, or null if the package can't be located.</summary>
+        public static string BundledServerDirectory()
         {
-            var trimmed = pythonServerPath.TrimEnd('/', '\\');
-            return isWindows ? $"{trimmed}\\.venv\\Scripts\\python.exe" : $"{trimmed}/.venv/bin/python3";
+            var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(MCPServerEntryBuilder).Assembly);
+            if (package == null || string.IsNullOrEmpty(package.resolvedPath)) return null;
+            var dir = Path.Combine(package.resolvedPath, "Server~");
+            return Directory.Exists(dir) ? Path.GetFullPath(dir) : null;
         }
 
-        public static List<string> Args()
+        public static List<string> Args(string serverDirectory)
         {
-            return new List<string> { "-m", "unity_mcp_server.server" };
+            return new List<string> { "run", "--project", serverDirectory, "--frozen", "python", "-m", "unity_mcp_server.server" };
         }
 
-        public static Dictionary<string, string> Env(string unityProjectRoot, string pythonServerPath)
+        public static Dictionary<string, string> Env(string unityProjectRoot, string serverDirectory)
         {
             return new Dictionary<string, string>
             {
                 ["UNITY_MCP_PROJECT_ROOT"] = unityProjectRoot,
-                ["PYTHONPATH"] = pythonServerPath
+                ["UV_PROJECT_ENVIRONMENT"] = Path.Combine(unityProjectRoot, "Library", "MCP", ".venv"),
+                ["PYTHONPATH"] = serverDirectory
             };
         }
     }

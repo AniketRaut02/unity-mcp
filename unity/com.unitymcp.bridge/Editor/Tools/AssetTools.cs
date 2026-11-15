@@ -226,12 +226,15 @@ namespace UnityMCP.Tools
         [MCPTool(
             "list_assets",
             "Lists asset paths (relative to Assets/) filtered by extension (e.g. 'prefab', 'mat', 'asset'), optionally " +
-            "under a subfolder. Omit extension to list every file. .meta files are always excluded.",
+            "under a subfolder. Omit extension to list every file. .meta files are always excluded. Big results come " +
+            "back as a total, per-folder counts and the first 100 paths; page with offset/limit.",
             group: "assets", readOnly: true)]
         public static MCPResult ListAssets(
             MCPToolContext ctx,
             [MCPParam("File extension to filter by, without the dot, e.g. 'prefab' or 'mat'. Omit to list every file.")] string extension = null,
-            [MCPParam("Subfolder under Assets/ to search, e.g. 'Prefabs/Enemies'. Omit to search the whole project.")] string underPath = null)
+            [MCPParam("Subfolder under Assets/ to search, e.g. 'Prefabs/Enemies'. Omit to search the whole project.")] string underPath = null,
+            [MCPParam("Index of the first result to return, for paging. Defaults to 0.")] int offset = 0,
+            [MCPParam("Maximum results to return. Defaults to 100; 0 returns everything.")] int limit = MCPListPaging.DefaultLimit)
         {
             var projectRoot = MCPProjectUtil.ProjectRoot;
             var assetsRoot = Path.Combine(projectRoot, "Assets");
@@ -257,7 +260,7 @@ namespace UnityMCP.Tools
                 .OrderBy(p => p, StringComparer.Ordinal)
                 .ToList();
 
-            return MCPResult.Success(new { assets });
+            return MCPResult.Success(MCPListPaging.Page(assets, "assets", offset, limit));
         }
 
         [MCPTool(

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
 using UnityEditor.Build;
@@ -34,7 +35,7 @@ namespace UnityMCP.Tools
             "real success/failure with error/warning counts, build time, and output size -- a failed build is " +
             "reported as ok:true with succeeded:false and the real error count, not a tool-call failure, since a " +
             "build failing is meaningful data, not a broken tool call.",
-            group: "build", latencyTier: MCPLatencyTier.Slow)]
+            group: "build", latencyTier: MCPLatencyTier.Slow, dangerous: true)]
         public static MCPResult BuildPlayer(
             MCPToolContext ctx,
             [MCPParam("Output path for the built player, relative to the project root, e.g. 'Builds/Windows/Game.exe'.")] string outputPath,
@@ -101,7 +102,7 @@ namespace UnityMCP.Tools
             "Configures Player Settings relevant to a build: company/product name, bundle version, and scripting " +
             "backend (Mono2x/IL2CPP) for a build target group. Scenes-in-build are configured separately via " +
             "add_scene_to_build/list_scenes_in_build (scene group) -- already covered there, not duplicated here.",
-            group: "build")]
+            group: "build", dangerous: true)]
         public static MCPResult ConfigureBuildSettings(
             MCPToolContext ctx,
             [MCPParam("New company name. Omit to leave unchanged.")] string companyName = null,
@@ -197,6 +198,9 @@ namespace UnityMCP.Tools
                         return MCPResult.Fail(
                             $"Package '{packageId}' isn't on this project's package allowlist (Window > Unity MCP > " +
                             "Tool Groups). Ask a human with Editor access to add it if this is expected.");
+                    var addGate = MCPApprovalGate.CheckDangerAction("manage_packages", "Adding a package",
+                        new Dictionary<string, object> { ["action"] = action, ["packageId"] = packageId });
+                    if (addGate != null) return addGate;
                     var req = Client.Add(packageId);
                     var waitError = WaitFor(req, timeoutSeconds);
                     if (waitError != null) return waitError;
@@ -207,6 +211,9 @@ namespace UnityMCP.Tools
                 {
                     if (string.IsNullOrEmpty(packageId)) return MCPResult.Fail("packageId is required for action 'remove'.");
                     if (!confirm) return MCPResult.Fail("Removing a package can break the project -- pass confirm: true to proceed.");
+                    var removeGate = MCPApprovalGate.CheckDangerAction("manage_packages", "Removing a package",
+                        new Dictionary<string, object> { ["action"] = action, ["packageId"] = packageId });
+                    if (removeGate != null) return removeGate;
                     var req = Client.Remove(packageId);
                     var waitError = WaitFor(req, timeoutSeconds);
                     if (waitError != null) return waitError;
@@ -226,7 +233,7 @@ namespace UnityMCP.Tools
             "Layer indices 0-7 are Unity's reserved built-in layers and are refused. Physics settings are already " +
             "covered by configure_physics_settings (physics group) and graphics tiers aren't exposed by a stable " +
             "public API, so neither is duplicated here.",
-            group: "build")]
+            group: "build", dangerous: true)]
         public static MCPResult ManageProjectSettings(
             MCPToolContext ctx,
             [MCPParam("Tag to add, if it doesn't already exist. Omit to skip.")] string addTag = null,

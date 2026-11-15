@@ -19,7 +19,7 @@ at a time.
 
 **2. Individual tool descriptions are themselves bloated.** Measured directly from this
 codebase's own source (`unity/com.unitymcp.bridge/Editor/Tools/*.cs` and
-`python/unity_mcp_server/workflows.py`):
+`unity/com.unitymcp.bridge/Server~/unity_mcp_server/workflows.py`):
 
 | Source | Count | Total description chars | Avg/tool | Est. tokens |
 |---|---|---|---|---|

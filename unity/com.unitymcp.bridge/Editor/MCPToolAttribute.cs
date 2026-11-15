@@ -74,7 +74,8 @@ namespace UnityMCP
             MCPLatencyTier latencyTier = MCPLatencyTier.Fast,
             bool destructive = false,
             string group = "core",
-            bool readOnly = false)
+            bool readOnly = false,
+            bool dangerous = false)
         {
             Name = name;
             Description = description;
@@ -82,6 +83,15 @@ namespace UnityMCP
             Destructive = destructive;
             Group = group;
             ReadOnly = readOnly;
+            Dangerous = dangerous;
         }
+
+        /// <summary>
+        /// Danger tier: hidden and refused ("Unknown tool") until a human turns the tier on in
+        /// Window > Unity MCP > Tool Groups; once on, every call needs approval in the Editor
+        /// (MCPApprovalGate). For tools that act outside the scene/asset sandbox: Player builds,
+        /// build settings, project settings.
+        /// </summary>
+        public bool Dangerous { get; }
     }
 }

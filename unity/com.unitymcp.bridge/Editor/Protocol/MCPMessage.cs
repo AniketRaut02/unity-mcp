@@ -2,42 +2,9 @@ using System.Collections.Generic;
 
 namespace UnityMCP.Protocol
 {
-    /// <summary>
-    /// Single wire message shape used for every message type (handshake, handshake_ack,
-    /// list_tools, tools_list, call, result). Fields not relevant to a given `type` are
-    /// simply left null/default — kept deliberately flat rather than polymorphic so
-    /// JSON (de)serialization on both the C# and Python side stays trivial.
-    /// </summary>
-    public class MCPMessage
-    {
-        public string type;
-
-        // Correlation id, present on every request and echoed back on its response.
-        public string id;
-
-        // handshake
-        public string token;
-
-        // handshake_ack / result / batch_result
-        public bool ok;
-        public string error;
-
-        // call
-        public string tool;
-        public Dictionary<string, object> args;
-
-        // result
-        public object result;
-
-        // tools_list
-        public List<MCPToolDescriptor> tools;
-
-        // batch (request)
-        public List<MCPBatchCallItem> calls;
-
-        // batch_result (response)
-        public List<MCPBatchResultItem> results;
-    }
+    // Protocol 2 payload shapes. The JSON-RPC 2.0 envelope around them is built by MCPRpc
+    // (MCPConnection.cs): tools/register carries MCPToolDescriptor[], tools/batch carries
+    // MCPBatchCallItem[] and answers with MCPBatchResultItem[].
 
     /// <summary>One sub-call within a batch_execute request.</summary>
     public class MCPBatchCallItem

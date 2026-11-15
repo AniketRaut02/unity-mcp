@@ -6,28 +6,15 @@ using System.Text;
 namespace UnityMCP.Security
 {
     /// <summary>
-    /// The actual fix for the reported "MCP silently fails mid-use, Setup window says
-    /// another instance's PID is active" incident.
+    /// Guarantees one Unity Editor per project publishes Library/MCP/unity.json (and so is the
+    /// one the project's MCP servers accept). Two live Editors on one project used to take
+    /// turns overwriting the shared rendezvous file, silently redirecting a connected client
+    /// to whichever wrote last; a tool call succeeding against the WRONG Editor is worse than
+    /// a loud failure.
     ///
-    /// MCPInstanceConflictDetector (see that file) only ever produced a WARNING: even
-    /// after detecting a live conflict, MCPServer.Start() still went ahead and
-    /// overwrote session.json unconditionally. With two live Unity processes for the
-    /// same project, both would keep re-winning that race on every domain reload —
-    /// whichever one wrote session.json LAST is the one any (re)connecting client
-    /// reaches, silently, with no error at all. A tool call succeeding against the
-    /// WRONG Unity process is worse than a loud failure: it looks like it worked.
-    ///
-    /// PID comparison is also inherently racy as a way to detect "is the other side
-    /// still alive": a stale session.json can reference a PID that Windows has since
-    /// reused for a completely unrelated process, which would read back as "still
-    /// alive" forever and misreport a permanent phantom conflict.
-    ///
-    /// An OS-level exclusive file lock has neither problem: only one process can ever
-    /// hold it at a time (true mutual exclusion, not a heuristic), and the OS
-    /// guarantees it is released the instant the holding process exits for ANY reason
-    /// — clean shutdown, crash, or a hard kill — so there is no PID-reuse window to
-    /// misread. Whoever holds the lock is unambiguously the one process allowed to
-    /// claim session.json for this project.
+    /// An OS-level exclusive file lock is real mutual exclusion, not a PID heuristic: only one
+    /// process can hold it, and the OS releases it the instant that process exits for ANY
+    /// reason (clean quit, crash, hard kill), so there is no PID-reuse window to misread.
     /// </summary>
     public static class MCPInstanceLock
     {
@@ -78,7 +65,7 @@ namespace UnityMCP.Security
                 error =
                     "Another live Unity process already holds the MCP bridge lock for this project " +
                     $"(Library/MCP/bridge.lock is in use: {e.Message}). This Editor instance will not " +
-                    "start its own bridge to avoid silently fighting the other one over session.json.";
+                    "start its own bridge, so MCP clients keep talking to the other one.";
                 return false;
             }
         }

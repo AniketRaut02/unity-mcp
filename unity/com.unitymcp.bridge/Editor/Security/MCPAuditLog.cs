@@ -1,6 +1,9 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
 
 namespace UnityMCP.Security
@@ -20,11 +23,12 @@ namespace UnityMCP.Security
     /// </summary>
     internal static class MCPAuditLog
     {
-        private const long MaxSizeBytes = 5 * 1024 * 1024;
+        private const long MaxSizeBytes = 10 * 1024 * 1024;
+        private const int KeepRotatedFiles = 3;
+        public const int MaxValueChars = 1024;
 
         private static string LogDir => Path.Combine(Application.dataPath, "..", "Library", "MCP");
         private static string LogPath => Path.Combine(LogDir, "audit.log");
-        private static string RotatedLogPath => Path.Combine(LogDir, "audit.log.1");
         private static readonly object _lock = new object();
 
         public static void Record(string requestId, string tool, string argsJson, bool ok, string error, long elapsedMs)
@@ -36,8 +40,8 @@ namespace UnityMCP.Security
                 tool,
                 ok ? "OK" : "FAIL",
                 elapsedMs + "ms",
-                Truncate(argsJson, 500),
-                Truncate(error, 500)
+                argsJson ?? "", // each value already cut to MaxValueChars by the caller (TruncateValues)
+                Truncate(error, MaxValueChars)
             );
 
             lock (_lock)
@@ -63,23 +67,47 @@ namespace UnityMCP.Security
         /// empty file. Called under _lock, right before the append that would otherwise
         /// keep growing an oversized file indefinitely.
         /// </summary>
+        // audit.log -> audit.log.1 -> audit.log.2 -> audit.log.3 -> deleted
         private static void RotateIfNeeded()
         {
             var info = new FileInfo(LogPath);
             if (!info.Exists || info.Length < MaxSizeBytes) return;
 
+            var oldest = LogPath + "." + KeepRotatedFiles;
+            if (File.Exists(oldest)) File.Delete(oldest);
+            for (int i = KeepRotatedFiles - 1; i >= 1; i--)
+            {
+                var from = LogPath + "." + i;
+                if (File.Exists(from)) File.Move(from, LogPath + "." + (i + 1));
+            }
+            File.Move(LogPath, LogPath + ".1");
+            // Any failure here is caught by Record()'s own try/catch like any other write failure.
+        }
+
+        /// <summary>
+        /// Serializes tool arguments for the log with every string value cut to MaxValueChars, so
+        /// a whole script body never lands in the log but every argument name still does.
+        /// </summary>
+        public static string TruncateValues(object args)
+        {
             try
             {
-                File.Delete(RotatedLogPath);
+                var token = JToken.FromObject(args ?? new object());
+                var values = token is JContainer container ? container.Descendants().OfType<JValue>().ToList() : new System.Collections.Generic.List<JValue>();
+                foreach (var v in values)
+                {
+                    if (v.Type == JTokenType.String)
+                    {
+                        var text = (string)v.Value;
+                        if (text.Length > MaxValueChars) v.Value = text.Substring(0, MaxValueChars) + "...(truncated)";
+                    }
+                }
+                return token.ToString(Formatting.None);
             }
             catch
             {
-                // No pre-existing backup, or couldn't remove it -- Move below will throw
-                // if that actually blocks the rotation, which is caught by Record()'s
-                // own try/catch same as any other audit-log write failure.
+                return "<unserializable args>";
             }
-
-            File.Move(LogPath, RotatedLogPath);
         }
 
         private static string Truncate(string s, int max)

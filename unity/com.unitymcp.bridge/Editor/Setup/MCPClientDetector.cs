@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 
 namespace UnityMCP.Setup
 {
@@ -7,25 +8,17 @@ namespace UnityMCP.Setup
         ClaudeCode,
         Codex,
         Cursor,
-        Antigravity
+        Antigravity,
+        ClaudeDesktop,
+        VSCode
     }
 
-    /// <summary>
-    /// Client identity/naming logic only. This used to also build CLI commands
-    /// (claude/codex mcp add) — that approach was replaced with writing each client's
-    /// config file directly (see MCPMcpServersJsonWriter / MCPCodexTomlWriter /
-    /// MCPMcpConfigTargets), which removes the dependency on the claude/codex CLIs
-    /// being installed and avoids the CLI's own spawn-time working-directory behavior
-    /// (the actual root cause of a ModuleNotFoundError this project hit in production).
-    /// </summary>
     public static class MCPClientDetector
     {
         /// <summary>
-        /// The server key name used in every generated config entry. Kept
-        /// project-derived (not just "unity-mcp") so multiple Unity projects on one
-        /// machine, all writing to their own project-scoped config files, still end up
-        /// with distinct, recognizable names if a user ever compares configs side by
-        /// side or merges one into a global config file by hand.
+        /// The config entry name for this project: "unity-&lt;project folder&gt;", with anything but
+        /// letters, digits and '-' replaced by '-'. Entries with this name are the ones the
+        /// Setup window owns and keeps up to date (MCPClientConfigUpdater).
         /// </summary>
         public static string ServerName(string projectFolderName)
         {
@@ -51,6 +44,8 @@ namespace UnityMCP.Setup
             yield return MCPClientKind.Codex;
             yield return MCPClientKind.Cursor;
             yield return MCPClientKind.Antigravity;
+            yield return MCPClientKind.VSCode;
+            yield return MCPClientKind.ClaudeDesktop;
         }
 
         public static string DisplayName(MCPClientKind kind)
@@ -61,8 +56,35 @@ namespace UnityMCP.Setup
                 case MCPClientKind.Codex: return "Codex";
                 case MCPClientKind.Cursor: return "Cursor";
                 case MCPClientKind.Antigravity: return "Antigravity";
+                case MCPClientKind.VSCode: return "VS Code (Copilot)";
+                case MCPClientKind.ClaudeDesktop: return "Claude Desktop";
                 default: return kind.ToString();
             }
         }
+
+        /// <summary>
+        /// Best-effort "is this client installed for this user": the folder each client creates
+        /// in the user's home on first run. Used only to pick what "Configure all" touches;
+        /// any client can still be configured by hand.
+        /// </summary>
+        public static bool IsDetected(MCPClientKind kind)
+        {
+            var home = MCPMcpConfigTargets.Home();
+            switch (kind)
+            {
+                case MCPClientKind.ClaudeCode: return Directory.Exists(Path.Combine(home, ".claude"));
+                case MCPClientKind.Codex: return Directory.Exists(Path.Combine(home, ".codex"));
+                case MCPClientKind.Cursor: return Directory.Exists(Path.Combine(home, ".cursor"));
+                case MCPClientKind.Antigravity: return Directory.Exists(Path.Combine(home, ".gemini"));
+                case MCPClientKind.VSCode: return Directory.Exists(Path.Combine(home, ".vscode"));
+                case MCPClientKind.ClaudeDesktop: return Directory.Exists(MCPMcpConfigTargets.ClaudeDesktopConfigDir());
+                default: return false;
+            }
+        }
+
+        /// <summary>Clients that read AGENTS.md for project guidance (Claude Code gets the SKILL.md instead; Claude Desktop has no project).</summary>
+        public static bool ReadsAgentsMd(MCPClientKind kind) =>
+            kind == MCPClientKind.Codex || kind == MCPClientKind.Cursor ||
+            kind == MCPClientKind.Antigravity || kind == MCPClientKind.VSCode;
     }
 }

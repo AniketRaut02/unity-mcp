@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
+using Newtonsoft.Json.Linq;
 using UnityMCP;
 using UnityMCP.Protocol;
 using UnityMCP.Security;
@@ -156,7 +157,7 @@ public static class Program
         bool ok3 = MCPPathGuard.TryResolveWithinAssets("/fake/project", "/etc/passwd", out fullPath, out error);
         Check(!ok3 && error != null, "path guard blocks an absolute path: " + error);
 
-        // Must run before anything below ever touches the MCPServer type: doing so
+        // Must run before anything below ever touches the MCPBridge type: doing so
         // triggers its static constructor, which calls the real Start() and leaves
         // MCPInstanceLock (a process-wide singleton, correctly so in production --
         // one process should only ever hold the lock for one project) held for
@@ -490,85 +491,69 @@ public static class Program
         Check(limiter.TryAcquire(2), "rate limiter allows a charge of 2 that exactly fills the remaining budget (10 total)");
         Check(!limiter.TryAcquire(1), "rate limiter blocks even a single-token charge once the budget is fully spent");
 
-        // --- batch_execute: real end-to-end test through MCPServer.Enqueue + MCPCommandDispatcher.DrainQueue,
-        // not a direct call to the private HandleBatch -- this exercises the actual enqueue/routing/dispatch
-        // pipeline a real client's batch message goes through.
-        MCPMessage capturedBatchResponse = null;
-        var batchMsg = new MCPMessage
+        // --- batch: real test through MCPCommandDispatcher.Process (the same path a tools/batch
+        // request from a Python server takes after MCPConnection enqueues it). ---
+        JObject RunBatch(string id, object calls) => JObject.Parse(MCPCommandDispatcher.Process(new MCPBridge.PendingCommand
         {
-            type = "batch",
-            id = "batch-1",
-            calls = new List<MCPBatchCallItem>
-            {
-                new MCPBatchCallItem { tool = "test_nondestructive", args = new Dictionary<string, object> { ["value"] = "a" } },
-                new MCPBatchCallItem { tool = "test_slow" },
-                new MCPBatchCallItem { tool = "test_nondestructive", args = new Dictionary<string, object> { ["value"] = "b" } },
-            }
-        };
-        MCPServer.Enqueue(new MCPServer.PendingCommand { Message = batchMsg, Respond = r => capturedBatchResponse = r });
-        MCPCommandDispatcher.DrainQueue();
+            Id = id,
+            Method = "tools/batch",
+            Params = JObject.FromObject(new { calls })
+        }));
 
-        Check(capturedBatchResponse != null && capturedBatchResponse.type == "batch_result", "batch produces a batch_result response");
-        Check(capturedBatchResponse?.results?.Count == 3, "batch_result contains one entry per sub-call, in order");
-        Check(capturedBatchResponse?.results[0].ok == true, "batch item 0 (fast tool) succeeds");
-        Check(capturedBatchResponse?.results[1].ok == false && capturedBatchResponse.results[1].error.Contains("cannot run inside a batch"),
-            "batch item 1 (Slow-tier tool) is rejected with a clear message, not silently dropped or run: " + capturedBatchResponse?.results[1].error);
-        Check(capturedBatchResponse?.results[2].ok == true, "batch item 2 (fast tool, after the rejected slow one) still runs normally");
+        var batchResponse = RunBatch("batch-1", new[]
+        {
+            new MCPBatchCallItem { tool = "test_nondestructive", args = new Dictionary<string, object> { ["value"] = "a" } },
+            new MCPBatchCallItem { tool = "test_slow" },
+            new MCPBatchCallItem { tool = "test_nondestructive", args = new Dictionary<string, object> { ["value"] = "b" } },
+        });
+        var batchResults = batchResponse["result"]?["results"] as JArray;
+        Check((string)batchResponse["id"] == "batch-1" && batchResults != null, "batch answers with a JSON-RPC result carrying a results array");
+        Check(batchResults?.Count == 3, "batch result contains one entry per sub-call, in order");
+        Check((bool?)batchResults?[0]["ok"] == true, "batch item 0 (fast tool) succeeds");
+        Check((bool?)batchResults?[1]["ok"] == false && ((string)batchResults?[1]["error"] ?? "").Contains("cannot run inside a batch"),
+            "batch item 1 (Slow-tier tool) is rejected with a clear message, not silently dropped or run: " + batchResults?[1]["error"]);
+        Check((bool?)batchResults?[2]["ok"] == true, "batch item 2 (fast tool, after the rejected slow one) still runs normally");
 
         // Empty batch and oversized batch are rejected at the batch level (not per-item).
-        MCPMessage capturedEmptyResponse = null;
-        MCPServer.Enqueue(new MCPServer.PendingCommand
-        {
-            Message = new MCPMessage { type = "batch", id = "batch-empty", calls = new List<MCPBatchCallItem>() },
-            Respond = r => capturedEmptyResponse = r
-        });
-        MCPCommandDispatcher.DrainQueue();
-        Check(capturedEmptyResponse != null && !capturedEmptyResponse.ok && capturedEmptyResponse.error.Contains("no calls"),
-            "an empty batch is rejected at the batch level: " + capturedEmptyResponse?.error);
+        var emptyResponse = RunBatch("batch-empty", new MCPBatchCallItem[0]);
+        Check(((string)emptyResponse["error"]?["message"] ?? "").Contains("no calls"),
+            "an empty batch is rejected at the batch level: " + emptyResponse["error"]);
 
         var oversizedCalls = new List<MCPBatchCallItem>();
         for (int i = 0; i < 26; i++) oversizedCalls.Add(new MCPBatchCallItem { tool = "test_nondestructive", args = new Dictionary<string, object> { ["value"] = i.ToString() } });
-        MCPMessage capturedOversizedResponse = null;
-        MCPServer.Enqueue(new MCPServer.PendingCommand
-        {
-            Message = new MCPMessage { type = "batch", id = "batch-oversized", calls = oversizedCalls },
-            Respond = r => capturedOversizedResponse = r
-        });
-        MCPCommandDispatcher.DrainQueue();
-        Check(capturedOversizedResponse != null && !capturedOversizedResponse.ok && capturedOversizedResponse.error.Contains("exceeds the max"),
-            "a batch of 26 (over the 25 cap) is rejected at the batch level: " + capturedOversizedResponse?.error);
+        var oversizedResponse = RunBatch("batch-oversized", oversizedCalls);
+        Check(((string)oversizedResponse["error"]?["message"] ?? "").Contains("exceeds the max"),
+            "a batch of 26 (over the 25 cap) is rejected at the batch level: " + oversizedResponse["error"]);
 
-        // --- Priority queue: fast calls enqueued AFTER a slow one still get processed first ---
-        var processedOrder = new List<string>();
-        MCPServer.Enqueue(new MCPServer.PendingCommand
+        // --- Routing: a Slow-tier call goes to the slow queue, fast calls to the fast queue,
+        // so fast calls enqueued AFTER a slow one are still dequeued first. ---
+        MCPBridge.PendingCommand Call(string id, string tool) => new MCPBridge.PendingCommand
         {
-            Message = new MCPMessage { type = "call", id = "order-slow", tool = "test_slow" },
-            Respond = r => processedOrder.Add("slow")
-        });
-        MCPServer.Enqueue(new MCPServer.PendingCommand
-        {
-            Message = new MCPMessage { type = "call", id = "order-fast-1", tool = "test_nondestructive", args = new Dictionary<string, object> { ["value"] = "x" } },
-            Respond = r => processedOrder.Add("fast1")
-        });
-        MCPServer.Enqueue(new MCPServer.PendingCommand
-        {
-            Message = new MCPMessage { type = "call", id = "order-fast-2", tool = "test_nondestructive", args = new Dictionary<string, object> { ["value"] = "y" } },
-            Respond = r => processedOrder.Add("fast2")
-        });
+            Id = id,
+            Method = "tools/call",
+            Params = JObject.FromObject(new { tool, args = new { value = "x" } })
+        };
+        MCPBridge.Enqueue(Call("order-slow", "test_slow"));
+        MCPBridge.Enqueue(Call("order-fast-1", "test_nondestructive"));
+        MCPBridge.Enqueue(Call("order-fast-2", "test_nondestructive"));
+        Check(MCPBridge.HasPendingSlow(), "the Slow-tier call is routed to the slow queue");
+        Check(MCPBridge.TryDequeueFast(out var f1) && f1.Id == "order-fast-1" && MCPBridge.TryDequeueFast(out var f2) && f2.Id == "order-fast-2",
+            "both fast calls come off the fast queue, ahead of the slow one");
         MCPCommandDispatcher.DrainQueue();
+        Check(!MCPBridge.HasPendingSlow(), "DrainQueue processes the waiting slow call");
 
-        Check(processedOrder.Count == 3, "all three queued items were processed in this DrainQueue tick");
-        Check(processedOrder.IndexOf("fast1") < processedOrder.IndexOf("slow") && processedOrder.IndexOf("fast2") < processedOrder.IndexOf("slow"),
-            "both fast calls are processed before the slow call despite being enqueued after it: [" + string.Join(", ", processedOrder) + "]");
+        // --- Answer cache: the same request id is answered from cache, the tool does not run again ---
+        var first = MCPCommandDispatcher.Process(Call("dedupe-1", "test_nondestructive"));
+        MCPCommandDispatcher.Execute(Call("dedupe-1", "test_nondestructive")); // stores it
+        Check(MCPAnswerCache.TryGet("dedupe-1", out var cached) && cached == first,
+            "a finished request id is kept in the answer cache with its exact reply");
 
         TestToolGroups();
         TestParameterSchemaPolish();
         TestArrayParameterSupport();
         TestSetupWindowLogic();
-        TestInstanceConflictDetection();
         TestAuthHandshakeTokenSecurity();
         TestNoDuplicatePlayModeTools();
-        TestClientCountRestartContext();
         TestPathGuardSymlinkDetection();
         TestTypeResolverCachingAndAmbiguity();
         TestHierarchyCacheObjectChangeEvents();
@@ -577,9 +562,9 @@ public static class Program
     private static void TestInstanceLock()
     {
         // Regression test for the actual reported incident: two live Unity processes
-        // for the same project used to both keep overwriting session.json on every
-        // domain reload (MCPInstanceConflictDetector only ever logged a warning, it
-        // never stopped the second one from writing) -- a connected MCP client would
+        // for the same project used to both keep overwriting the shared rendezvous file on
+        // every domain reload (a conflict detector only ever logged a warning, it never
+        // stopped the second one from writing) -- a connected MCP client would
         // silently get redirected to whichever process wrote last, with no error at
         // all. MCPInstanceLock is the actual mutual-exclusion fix: it's an OS-level
         // exclusive file lock, so this test verifies the real primitive, not a mock of it.
@@ -641,51 +626,10 @@ public static class Program
         }
         Check(isHex, "the token is lowercase-hex-encoded: " + tokenA);
 
-        Check(MCPAuthHandshake.Validate(tokenA), "Validate accepts the token that was just generated");
-        Check(!MCPAuthHandshake.Validate(tokenA.Substring(0, 63) + (tokenA[63] == 'a' ? 'b' : 'a')),
-            "Validate rejects a token that differs in only the last character");
-        Check(!MCPAuthHandshake.Validate(null), "Validate rejects a null token without throwing");
-        Check(!MCPAuthHandshake.Validate(""), "Validate rejects an empty token");
-
-        var tokenB = MCPAuthHandshake.EnsureToken();
-        Check(tokenA != tokenB, "two successive EnsureToken() calls produce different tokens");
-        Check(!MCPAuthHandshake.Validate(tokenA), "the OLD token is rejected once a new one has been generated (EnsureToken fully replaces it, not appends)");
-        Check(MCPAuthHandshake.Validate(tokenB), "the NEW token validates correctly");
-    }
-
-    private static void TestClientCountRestartContext()
-    {
-        // Regression test for a real reported confusion: the Setup window showed "0
-        // clients" immediately upon entering Play Mode even though the AI agent's MCP
-        // session never saw an interruption, with no indication of why. The 0 itself
-        // was correct (Play Mode's domain reload -- on by default unless Enter Play
-        // Mode Options disables it -- wipes MCPServer's static state, including
-        // _connectedClientCount, and drops the bridge's live socket), but the Setup
-        // window had no way to tell that apart from "nobody has ever connected" or
-        // "something is actually broken". HadClientBeforeLastRestart/SecondsSinceStart
-        // are what it now uses to tell those apart -- exercised here via a real
-        // Stop()/Start() cycle (which is exactly what beforeAssemblyReload -> domain
-        // reload -> the static constructor's Start() call looks like from a single
-        // process's point of view), not a mock of it.
-        bool wasRunning = MCPServer.BoundPort > 0;
-
-        MCPServer.Stop();
-        Check(double.IsPositiveInfinity(MCPServer.SecondsSinceStart), "SecondsSinceStart is +Infinity while the bridge is not running -- never a false 'just started' reading");
-        Check(!MCPServer.HadClientBeforeLastRestart, "HadClientBeforeLastRestart is false after a Stop() with zero clients connected at the time");
-
-        MCPServer.Start();
-        Check(MCPServer.BoundPort > 0, "MCPServer restarts successfully after Stop() -- models the Stop() -> (domain reload) -> Start() cycle a Play Mode transition triggers by default");
-        Check(!double.IsPositiveInfinity(MCPServer.SecondsSinceStart) && MCPServer.SecondsSinceStart >= 0,
-            "SecondsSinceStart is a finite, non-negative reading once running again: " + MCPServer.SecondsSinceStart);
-
-        // SessionState itself (not MCPServer) is what has to survive the domain
-        // reload boundary -- sanity-check the underlying primitive directly, since a
-        // plain static field would silently defeat the whole point of this fix.
-        UnityEditor.SessionState.SetBool("mcp_test_session_key", true);
-        Check(UnityEditor.SessionState.GetBool("mcp_test_session_key", false), "SessionState round-trips a bool set earlier in the same process (models surviving a domain reload, which this stub process never actually performs)");
-        Check(UnityEditor.SessionState.GetBool("mcp_test_key_never_set", false) == false, "SessionState.GetBool returns the given default for a key that was never set");
-
-        if (!wasRunning) MCPServer.Stop(); // leave state as found for anything that runs after this
+        // Protocol 2: one token per Editor launch, kept in SessionState so a domain reload
+        // (static fields wiped, SessionState kept) presents the same token again.
+        Check(MCPAuthHandshake.EnsureToken() == tokenA, "EnsureToken returns the same token for the rest of the Editor session");
+        Check(MCPAuthHandshake.NewToken() != tokenA, "NewToken produces a fresh random token each call");
     }
 
     private static void TestNoDuplicatePlayModeTools()
@@ -877,18 +821,10 @@ public static class Program
         Check(allCorrect, $"all {expectedGroups.Count} module tools (scripting/physics/assets/ui) are tagged with the correct group"
             + (mismatches.Count > 0 ? ": " + string.Join(", ", mismatches) : ""));
 
-        // Group also has to make it into the wire descriptor Python actually reads.
-        MCPMessage capturedListToolsResponse = null;
-        MCPServer.Enqueue(new MCPServer.PendingCommand
-        {
-            Message = new MCPMessage { type = "list_tools", id = "group-wire-check" },
-            Respond = r => capturedListToolsResponse = r
-        });
-        MCPCommandDispatcher.DrainQueue();
-
-        var scriptingDescriptor = capturedListToolsResponse?.tools?.Find(t => t.name == "create_script");
+        // Group also has to make it into the tools/register descriptor Python actually reads.
+        var scriptingDescriptor = MCPCommandDispatcher.BuildToolDescriptors().Find(t => t.name == "create_script");
         Check(scriptingDescriptor != null && scriptingDescriptor.group == "scripting",
-            "the 'group' field survives all the way into the list_tools wire descriptor: " + scriptingDescriptor?.group);
+            "the 'group' field survives all the way into the tools/register wire descriptor: " + scriptingDescriptor?.group);
     }
 
     private static void TestSetupWindowLogic()
@@ -899,11 +835,19 @@ public static class Program
         Check(MCPClientDetector.ServerName("") == "unity", "ServerName falls back to plain 'unity' for an empty project folder name");
         Check(MCPClientDetector.ServerName(null) == "unity", "ServerName falls back to plain 'unity' for a null project folder name");
 
-        // --- AllKinds / DisplayName cover all four clients ---
+        // --- AllKinds / DisplayName cover all six clients ---
         var allKinds = new List<MCPClientKind>(MCPClientDetector.AllKinds());
-        Check(allKinds.Count == 4 && allKinds.Contains(MCPClientKind.ClaudeCode) && allKinds.Contains(MCPClientKind.Codex)
-              && allKinds.Contains(MCPClientKind.Cursor) && allKinds.Contains(MCPClientKind.Antigravity),
-            "AllKinds returns exactly the four supported clients: " + string.Join(", ", allKinds));
+        Check(allKinds.Count == 6 && allKinds.Contains(MCPClientKind.ClaudeCode) && allKinds.Contains(MCPClientKind.Codex)
+              && allKinds.Contains(MCPClientKind.Cursor) && allKinds.Contains(MCPClientKind.Antigravity)
+              && allKinds.Contains(MCPClientKind.VSCode) && allKinds.Contains(MCPClientKind.ClaudeDesktop),
+            "AllKinds returns exactly the six supported clients: " + string.Join(", ", allKinds));
+        Check(MCPMcpConfigTargets.RelativePathDisplay(MCPClientKind.VSCode) == ".vscode/mcp.json"
+              && MCPMcpConfigTargets.JsonRootKey(MCPClientKind.VSCode) == "servers"
+              && MCPMcpConfigTargets.EntryType(MCPClientKind.VSCode) == "stdio",
+            "VS Code: .vscode/mcp.json, 'servers' root key, explicit stdio type");
+        Check(MCPMcpConfigTargets.IsGlobal(MCPClientKind.ClaudeDesktop)
+              && MCPMcpConfigTargets.AbsolutePath(MCPClientKind.ClaudeDesktop, "/ignored").EndsWith("claude_desktop_config.json"),
+            "Claude Desktop uses its single global config file");
         Check(MCPClientDetector.DisplayName(MCPClientKind.Cursor) == "Cursor" && MCPClientDetector.DisplayName(MCPClientKind.Antigravity) == "Antigravity",
             "DisplayName has real names for the two newly-added clients");
 
@@ -923,42 +867,21 @@ public static class Program
         Check(absPath == "/Users/dev/MyGame/.cursor/mcp.json" || absPath == "/Users/dev/MyGame\\.cursor\\mcp.json",
             "AbsolutePath combines project root with the client's relative path correctly: " + absPath);
 
-        // --- MCPServerEntryBuilder: absolute venv python path, explicit separators (not
-        // Path.Combine, which uses the real runtime OS's separator regardless of the
-        // logical isWindows flag -- the same class of bug found and fixed earlier for
-        // MCPClientDetector.AbsoluteVenvPythonExecutable, applied consistently here too) ---
-        Check(MCPServerEntryBuilder.AbsoluteVenvPythonExecutable("/Users/dev/python-server", isWindows: false) == "/Users/dev/python-server/.venv/bin/python3",
-            "AbsoluteVenvPythonExecutable builds the correct Unix venv path");
-        Check(MCPServerEntryBuilder.AbsoluteVenvPythonExecutable("C:\\Projects\\python-server", isWindows: true) == "C:\\Projects\\python-server\\.venv\\Scripts\\python.exe",
-            "AbsoluteVenvPythonExecutable builds the correct Windows venv path, even when run on a non-Windows test machine");
+        // --- MCPServerEntryBuilder: uv runs the server bundled in the package (Server~) ---
+        var builtArgs = MCPServerEntryBuilder.Args("/pkg/Server~");
+        Check(string.Join(" ", builtArgs) == "run --project /pkg/Server~ --frozen python -m unity_mcp_server.server",
+            "Args runs the bundled server with uv from its lockfile: " + string.Join(" ", builtArgs));
 
-        var builtArgs = MCPServerEntryBuilder.Args();
-        Check(builtArgs.Count == 2 && builtArgs[0] == "-m" && builtArgs[1] == "unity_mcp_server.server", "Args() is exactly ['-m', 'unity_mcp_server.server']");
-
-        var builtEnv = MCPServerEntryBuilder.Env("/Users/dev/MyGame", "/Users/dev/python-server");
-        Check(builtEnv["UNITY_MCP_PROJECT_ROOT"] == "/Users/dev/MyGame" && builtEnv["PYTHONPATH"] == "/Users/dev/python-server",
-            "Env() sets both UNITY_MCP_PROJECT_ROOT and PYTHONPATH explicitly -- this is what makes the generated config self-contained regardless of the client's own spawn-time working directory, closing the exact gap that caused the reported ModuleNotFoundError");
+        var builtEnv = MCPServerEntryBuilder.Env("/Users/dev/MyGame", "/pkg/Server~");
+        Check(builtEnv["UNITY_MCP_PROJECT_ROOT"] == "/Users/dev/MyGame" && builtEnv["PYTHONPATH"] == "/pkg/Server~"
+              && builtEnv["UV_PROJECT_ENVIRONMENT"].Replace('\\', '/') == "/Users/dev/MyGame/Library/MCP/.venv",
+            "Env sets the project root, the per-project venv location, and PYTHONPATH to the bundled server");
 
         TestMiniJsonParsing();
         TestMcpServersJsonWriterMerging();
         TestCodexTomlWriterMerging();
         TestEndToEndConfigFileWriting();
-        TestPythonServerSettings();
         TestClientConfigTracker();
-    }
-
-    private static void TestPythonServerSettings()
-    {
-        // Moved here from the now-removed visual Tool Builder (MCPToolBuilderSettings)
-        // -- the Setup window is the only remaining consumer of this setting. Confirms
-        // the plain EditorPrefs get/set round-trip still works from its new home.
-        MCPPythonServerSettings.PythonServerPath = "/Users/dev/python-server";
-        Check(MCPPythonServerSettings.PythonServerPath == "/Users/dev/python-server",
-            "PythonServerPath round-trips through EditorPrefs: " + MCPPythonServerSettings.PythonServerPath);
-
-        MCPPythonServerSettings.PythonServerPath = "/somewhere/else";
-        Check(MCPPythonServerSettings.PythonServerPath == "/somewhere/else",
-            "PythonServerPath reflects an updated value, not just the first one ever set");
     }
 
     private static void TestClientConfigTracker()
@@ -1146,14 +1069,14 @@ public static class Program
         try
         {
             var serverName = "unity-TestProject";
-            var args = MCPServerEntryBuilder.Args();
+            var args = MCPServerEntryBuilder.Args("/pkg/Server~");
 
             // --- Cursor (JSON) ---
             var cursorPath = MCPMcpConfigTargets.AbsolutePath(MCPClientKind.Cursor, tempRoot);
             Directory.CreateDirectory(Path.GetDirectoryName(cursorPath));
             File.WriteAllText(cursorPath, "{\"mcpServers\": {\"pre-existing\": {\"command\": \"npx\", \"args\": []}}}");
 
-            var env1 = MCPServerEntryBuilder.Env(tempRoot, "/Users/dev/python-server");
+            var env1 = MCPServerEntryBuilder.Env(tempRoot, "/pkg/Server~");
             var entry1 = MCPMcpServersJsonWriter.BuildServerEntryJson("/Users/dev/python-server/.venv/bin/python3", args, env1);
             MCPMcpServersJsonWriter.TryMerge(File.ReadAllText(cursorPath), serverName, entry1, out var written1, out _);
             File.WriteAllText(cursorPath, written1);
@@ -1163,7 +1086,7 @@ public static class Program
                 "End-to-end: a real file written to disk for Cursor contains both the pre-existing entry and our new one");
 
             // Re-configure with a different path -- proves the real ON-DISK file gets updated, not just in-memory.
-            var env2 = MCPServerEntryBuilder.Env(tempRoot, "/updated/python-server");
+            var env2 = MCPServerEntryBuilder.Env(tempRoot, "/updated/pkg/Server~");
             var entry2 = MCPMcpServersJsonWriter.BuildServerEntryJson("/updated/python-server/.venv/bin/python3", args, env2);
             MCPMcpServersJsonWriter.TryMerge(File.ReadAllText(cursorPath), serverName, entry2, out var written2, out _);
             File.WriteAllText(cursorPath, written2);
@@ -1198,60 +1121,6 @@ public static class Program
         {
             try { Directory.Delete(tempRoot, recursive: true); } catch { /* best effort */ }
         }
-    }
-
-    private static void TestInstanceConflictDetection()
-    {
-        const int currentPid = 1000;
-        const int currentPort = 45678;
-
-        // --- No session file on disk at all: nothing to compare against, no conflict ---
-        var noFile = MCPInstanceConflictDetector.Evaluate(currentPid, currentPort, null, pid => true);
-        Check(!noFile.HasConflict, "no session.json on disk at all is not treated as a conflict: " + noFile.Message);
-
-        // --- session.json belongs to THIS process (normal case, e.g. right after our own Write()) ---
-        var ownSession = new MCPSessionSnapshot { Pid = currentPid, Port = currentPort, StartedAt = "now" };
-        var ownResult = MCPInstanceConflictDetector.Evaluate(currentPid, currentPort, ownSession, pid => true);
-        Check(!ownResult.HasConflict, "session.json matching this process's own PID is not a conflict: " + ownResult.Message);
-
-        // --- session.json belongs to a DIFFERENT pid, but that process is no longer running ---
-        var stalePid = 2000;
-        var staleSession = new MCPSessionSnapshot { Pid = stalePid, Port = 45679, StartedAt = "earlier" };
-        var staleResult = MCPInstanceConflictDetector.Evaluate(currentPid, currentPort, staleSession, pid => false);
-        Check(!staleResult.HasConflict, "session.json from a different PID that's no longer alive is stale, not a conflict: " + staleResult.Message);
-
-        // --- session.json belongs to a different, LIVE pid, but claims the SAME port this
-        // process is bound to -- impossible for two real listeners, so treated as a
-        // transient mid-write read, not a genuine second listener ---
-        var samePortSession = new MCPSessionSnapshot { Pid = 3000, Port = currentPort, StartedAt = "now" };
-        var samePortResult = MCPInstanceConflictDetector.Evaluate(currentPid, currentPort, samePortSession, pid => true);
-        Check(!samePortResult.HasConflict, "a different live PID claiming the SAME port as this process is treated as a transient read, not a real conflict: " + samePortResult.Message);
-
-        // --- THE actual reported incident: a different, LIVE pid, on a DIFFERENT port ---
-        var conflictingPid = 4000;
-        var conflictingSession = new MCPSessionSnapshot { Pid = conflictingPid, Port = 45680, StartedAt = "2026-01-01T00:00:00Z" };
-        var conflictResult = MCPInstanceConflictDetector.Evaluate(currentPid, currentPort, conflictingSession, pid => pid == conflictingPid);
-        Check(conflictResult.HasConflict, "a different, live PID on a genuinely different port IS flagged as a real conflict: " + conflictResult.Message);
-        Check(conflictResult.OtherPid == conflictingPid && conflictResult.OtherPort == 45680,
-            "the conflict info carries the actual other PID and port for display: " + conflictResult.Message);
-        Check(conflictResult.Message.Contains("4000") && conflictResult.Message.Contains("45680"),
-            "the conflict message names the specific PID and port, not just 'a conflict exists': " + conflictResult.Message);
-
-        // --- The isProcessAlive delegate is actually consulted with the RIGHT pid, not
-        // some hardcoded/ignored value -- verified by having it return false only for the
-        // specific pid under test and confirming that flips the result. ---
-        var otherPid = 5000;
-        var otherSession = new MCPSessionSnapshot { Pid = otherPid, Port = 45681, StartedAt = "now" };
-        var aliveResult = MCPInstanceConflictDetector.Evaluate(currentPid, currentPort, otherSession, pid => pid == otherPid);
-        var deadResult = MCPInstanceConflictDetector.Evaluate(currentPid, currentPort, otherSession, pid => pid != otherPid);
-        Check(aliveResult.HasConflict && !deadResult.HasConflict,
-            "the isProcessAlive delegate is actually consulted with the specific PID being checked, not ignored");
-
-        // --- Smoke test of the real wrapper: DetectReal() runs against actual OS state
-        // (this test process's own PID) without throwing, even with no real session.json
-        // present in this stub environment. ---
-        var real = MCPInstanceConflictDetector.DetectReal(currentPort);
-        Check(real != null, "DetectReal() runs against real OS process state without throwing");
     }
 
     private static void TestPathGuardSymlinkDetection()

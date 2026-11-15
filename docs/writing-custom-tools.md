@@ -230,10 +230,11 @@ But a lot of what you'll want is really a **composite** tool: an existing
 sequence of atomic tools you find yourself asking an agent to chain
 together repeatedly ("create a GameObject, add a collider, set its
 position..."). For that, write a Python `@workflow`-decorated function
-directly in `python/unity_mcp_server/custom_workflows.py` — the exact same
+in `<your project>/UnityMCP/custom_workflows.py` (outside `Assets/`, committed with the
+project, loaded when the server starts) — the exact same
 mechanism `batch_execute` and `create_behavior_tree` are built on (see
-`workflows.py` for the pattern). No restart of Unity needed; just reconnect
-your MCP client session to pick up the new tool.
+`Server~/unity_mcp_server/workflows.py` in the package for the pattern). No restart of Unity
+needed; just restart your MCP client session to pick up the new tool.
 
 If what you need is "chain some tools together," write a composite tool in
 Python; if you need new Unity-side logic no existing tool has, write a

@@ -1,0 +1,40 @@
+[project]
+name = "darkpixel-unity-mcp"
+version = "2.0.0" # must equal ../package.json "version" (tests/test_versions.py checks)
+description = "MCP server for the Unity Editor: 300+ tools, survives domain reloads, human approval for risky actions."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11" # websockets 17.4 needs 3.11+; uv fetches a matching Python if missing
+authors = [{ name = "DarkPixelGD" }]
+keywords = ["mcp", "model context protocol", "unity", "unity3d", "claude", "ai", "game development"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries",
+]
+# Pinned exactly on purpose: the MCP SDK ecosystem has had supply-chain incidents.
+# Bump deliberately, then `uv lock`.
+dependencies = [
+    "mcp==1.28.1",
+    "websockets==17.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/AniketRaut02/unity-mcp"
+Changelog = "https://github.com/AniketRaut02/unity-mcp/blob/main/unity/com.unitymcp.bridge/CHANGELOG.md"
+
+[project.scripts]
+darkpixel-unity-mcp = "unity_mcp_server.server:main"
+unity-mcp-server = "unity_mcp_server.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["unity_mcp_server*"]
+
+[tool.uv]
+# Running from the Unity package: install dependencies only and run the source in place
+# (PYTHONPATH), so nothing is ever built or written inside the package folder.
+package = false

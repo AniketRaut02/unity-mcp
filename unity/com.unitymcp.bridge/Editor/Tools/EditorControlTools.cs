@@ -1,4 +1,5 @@
 using System;
+using UnityMCP.Security;
 using System.Diagnostics;
 using System.Linq;
 using UnityEditor;
@@ -45,7 +46,9 @@ namespace UnityMCP.Tools
             "hatch for features with no dedicated tool -- but note it fires whatever that menu item actually does, " +
             "including menu items that don't make sense headless (opening a dialog) or destroy state (e.g. discarding " +
             "unsaved changes). No result data beyond confirmation the item was found and invoked; check get_editor_state " +
-            "or get_console_logs afterward to see its effect.",
+            "or get_console_logs afterward to see its effect. Paths outside the project's menu allowlist (by default " +
+            "GameObject/, Component/, Assets/Create/, Window/ and Edit/Play|Pause|Step|Undo|Redo|Frame Selected) are in the " +
+            "danger tier: refused unless the user enabled it, then each needs the user's approval in the Editor.",
             group: "core")]
         public static MCPResult ExecuteMenuItem(
             MCPToolContext ctx,
@@ -53,6 +56,14 @@ namespace UnityMCP.Tools
         {
             if (string.IsNullOrWhiteSpace(menuPath))
                 return MCPResult.Fail("menuPath must not be empty.");
+
+            if (!UnityMCP.Groups.MCPToolGroupConfig.IsMenuAllowed(menuPath))
+            {
+                var gate = MCPApprovalGate.CheckDangerAction("execute_menu_item",
+                    $"Menu item '{menuPath}' is not on this project's menu allowlist, so it",
+                    new System.Collections.Generic.Dictionary<string, object> { ["menuPath"] = menuPath });
+                if (gate != null) return gate;
+            }
 
             bool found = EditorApplication.ExecuteMenuItem(menuPath);
             if (!found)
@@ -165,10 +176,9 @@ namespace UnityMCP.Tools
 
         [MCPTool(
             "list_unity_instances",
-            "Reports this Editor process's own PID/port/project, plus a count of other OS processes that look like Unity " +
-            "Editor instances (by process name) currently running on this machine. Cannot report the OTHER instances' " +
-            "project paths or ports -- there is no shared registry of running Unity MCP bridges to look them up in; use " +
-            "each project's own Setup window (multi-instance conflict detection) for that.",
+            "Reports this Editor process's own PID/project and how many MCP servers it is connected to, plus a count of " +
+            "other OS processes that look like Unity Editor instances (by process name) on this machine. Cannot report " +
+            "the OTHER instances' project paths -- use each project's own Setup window for that.",
             group: "core", readOnly: true)]
         public static MCPResult ListUnityInstances(MCPToolContext ctx)
         {
@@ -183,7 +193,7 @@ namespace UnityMCP.Tools
                 thisInstance = new
                 {
                     pid = current.Id,
-                    port = MCPServer.BoundPort,
+                    connectedMcpServers = MCPBridge.ConnectedServerCount,
                     projectRoot = MCPProjectUtil.ProjectRoot
                 },
                 otherProcessCount = others.Length,

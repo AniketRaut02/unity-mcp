@@ -4,6 +4,119 @@ All notable changes to this package are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] — Unity connects out over WebSocket; domain reloads no longer disconnect clients
+
+**Breaking:** the Unity package and the Python server must both be 2.0.0. They check each
+other's protocol version on connect and refuse a mismatch with a message saying so.
+
+### Changed
+- **Connection direction is flipped.** The Python MCP server is now the long-lived side.
+  Each server listens on an OS-assigned loopback port and advertises it in
+  `Library/MCP/servers/<pid>-<port>.json`. The Editor polls that folder once a second and
+  connects out to every live server over WebSocket (`ws://127.0.0.1:<port>/unity`).
+  Several AI clients on one project each get their own server, and Unity connects to all.
+- **Wire format is JSON-RPC 2.0**, one message per WebSocket text frame: `hello`,
+  `tools/register` (Unity pushes its tool list on connect and whenever a group is toggled),
+  `unity/reloading`, `ping`, `tools/call`, `tools/batch`.
+- **Session token is created by Unity once per Editor launch** and kept across domain
+  reloads (SessionState). It is published in `Library/MCP/unity.json`, which only the
+  Editor holding the project's instance lock writes, and is deleted when the Editor quits.
+- Setup window: shows each MCP server (pid, port, state, last error) with a **Reconnect**
+  button. The Tool Groups window shows connected servers instead of clients.
+
+### Install
+- **The MCP server ships inside this package** (`Server~/`, which Unity ignores) and is
+  launched with [uv](https://docs.astral.sh/uv/). There's no repo to clone, no venv to create and
+  no Python path to set: add the package, click **Configure all detected clients**. Each project
+  gets its own Python environment in `Library/MCP/.venv`, built from `uv.lock`'s exact versions.
+  If uv is missing, the Setup window shows the one-line install command with a Copy button.
+- **Client configs stay valid across package updates.** On Editor start, every config holding
+  this project's `unity-<Project>` entry is rewritten if the package folder (or uv) moved;
+  unchanged files are left alone. This also migrates 1.x configs automatically.
+- **New clients:** VS Code (Copilot, `.vscode/mcp.json`) and Claude Desktop (global config).
+  "Configure all detected clients" configures every supported client found for this user.
+- **Agent guidance on Configure:** Claude Code gets a `unity-mcp` skill in
+  `.claude/skills/`; Codex, Cursor, Antigravity and VS Code get a marked section in the
+  project's `AGENTS.md` (text outside the markers is never touched).
+- **Custom composite tools** moved from the server folder to
+  `<project>/UnityMCP/custom_workflows.py`, so they survive package updates and are committed
+  with the project. The Tool Builder writes there; its Python path setting is gone.
+- **Distribution:** PyPI package `darkpixel-unity-mcp` (`uvx darkpixel-unity-mcp`), a Claude
+  Desktop `.mcpb` bundle on each GitHub release, OpenUPM, and a tag-triggered GitHub Actions
+  release workflow (see `RELEASING.md`).
+- The Python server now needs Python 3.11+ (websockets 17.4); uv downloads one if needed.
+
+### Editor windows
+- Setup, Tool Groups, Approvals and Tool Builder share one redesigned look (`Editor/UI/MCPGui.cs`):
+  a header banner, cards with a coloured status stripe, coloured status pills (Connected,
+  Configured, Disabled, RO ...), tinted primary buttons, and tooltips on every field and button.
+  Required Tool Builder fields are marked `*`, and a step's tool name is checked as you type.
+
+### Fixed (setup)
+- Configuring a client no longer deletes the other top-level settings in its config file (for
+  example Claude Desktop's preferences or VS Code's `inputs`). Only our own entry is changed.
+
+### Token use
+- **Tool results are compact JSON** (no indentation, no `\u` escapes) instead of
+  pretty-printed: roughly half the tokens for the same data.
+- **Big reads are summary-first:**
+  - `get_hierarchy` returns the top level with each node's `childCount` (up to 200 nodes).
+    Expand with `path`, `depth` (-1 = all) and `limit` (0 = no cap). `depth=-1, limit=0` with
+    no path is the old full tree, still cached.
+  - `list_assets`, `list_scripts` and `find_gameobjects` return everything when small. Over
+    100 results they return `total`, a `byFolder` count and the first page, with
+    `offset`/`limit` paging (`limit=0` = all).
+  - `read_console_log` returns per-severity `counts` plus the newest 20 entries, without stack
+    traces unless `includeStackTraces=true`. `get_console_logs` defaults to 20 entries without
+    stack traces.
+- **`manage_tools` gains `describe`** (full schema of up to 10 tools, hidden ones included)
+  **and `call`** (run a tool by name without activating its group, with the same safety checks
+  as a direct call). Using one or two tools from an inactive group no longer means loading the
+  whole group's schemas. Only activate/deactivate/reset now trigger `tools/list_changed`.
+
+### Fixed
+- **Domain reloads (script compiles, Play Mode) no longer disconnect or break the client.**
+  Calls made during a reload are held by the Python server (up to 60 s, set by
+  `UNITY_MCP_RELOAD_TIMEOUT`) and then answered; past the limit they fail with "Unity is
+  reloading ... retry shortly". The client's tool list no longer shrinks while Unity reloads.
+- **A call interrupted by a reload no longer runs twice.** The server re-sends it with the
+  same request id; Unity keeps recent answers (200 entries, 5 minutes) across the reload and
+  returns the stored answer instead of running the tool again.
+- The Python server no longer crashes at startup when no Unity project is found; tool calls
+  report the problem instead.
+- `tools/list_changed` is now delivered even when Unity's tool list changes between client
+  requests (previously it was silently dropped outside a request).
+
+### Security
+- The WebSocket endpoint refuses connections that carry a browser `Origin` header, so web
+  pages cannot reach it (DNS rebinding), in addition to the token check.
+- Liveness: the server pings Unity every 10 s and drops a connection silent for 20 s.
+- **Danger tier**, off by default, switched on only by a human in Window > Unity MCP > Tool
+  Groups. It covers `build_player`, `configure_build_settings`, `manage_project_settings`
+  (hidden and refused as unknown while off), `manage_packages` add/remove, and
+  `execute_menu_item` paths outside the menu allowlist (refused with a reason while off).
+  New `dangerous: true` flag on `[MCPTool]` for tools that belong in it.
+- **Human approval in the Editor** for every danger-tier call once the tier is on. The call
+  returns `{status: "awaiting_approval"}` and nothing runs. The request appears in the new
+  Window > Unity MCP > Approvals, which opens by itself. After Approve, the agent's next call
+  with the same tool and arguments runs once. "Allow for this session" stops the prompts for
+  that one tool until the Editor closes. Approvals survive domain reloads.
+- **Menu allowlist** for `execute_menu_item`, editable in the Tool Groups window. Defaults:
+  `GameObject/`, `Component/`, `Assets/Create/`, `Window/`, `Edit/Play`, `Edit/Pause`,
+  `Edit/Step`, `Edit/Undo`, `Edit/Redo`, `Edit/Frame Selected`.
+- **Batch mode:** the bridge does not start in `-batchmode` unless
+  `UNITY_MCP_ALLOW_BATCHMODE=1` is set.
+- **Audit log:** each argument value is cut at 1 KB (previously the whole argument string at
+  500 characters); the log rotates at 10 MB and keeps 3 old files (previously 5 MB and 1).
+- **HTTP transport:** a bearer token is now always required. Without
+  `UNITY_MCP_HTTP_TOKEN`, one is generated once, saved to `Library/MCP/http_token`, and
+  printed on stderr. Requests from a non-localhost browser `Origin` get 403.
+
+### Removed
+- The Unity-hosted TCP listener (`MCPServer`), `session.json`, and
+  `MCPInstanceConflictDetector` (the OS-level `MCPInstanceLock` already guarantees one
+  Editor per project).
+
 ## [1.28.0] — Target Unity 6, migrate NavMesh tools to the AI Navigation package
 
 Follow-up to 1.27.1: with the package compiling again, the Console's remaining CS0618

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
+using UnityMCP.UI;
 
 namespace UnityMCP.Groups
 {
@@ -45,7 +46,7 @@ namespace UnityMCP.Groups
         {
             var window = GetWindow<MCPToolGroupsWindow>();
             window.titleContent = new GUIContent("Unity MCP Tool Groups");
-            window.minSize = new Vector2(480, 420);
+            window.minSize = new Vector2(500, 480);
         }
 
         private class ToolRow
@@ -67,17 +68,17 @@ namespace UnityMCP.Groups
         private Vector2 _scroll;
         private string _packageAllowlistText;
         private bool _packageAllowlistDirty;
+        private string _menuAllowlistText;
+        private bool _menuAllowlistDirty;
         private double _lastLiveRepaintTime;
-
-        private static readonly Color ColorDisabled = new Color(0.95f, 0.68f, 0.68f);
-        private static readonly Color ColorActive = new Color(0.72f, 0.92f, 0.72f);
-        private static readonly Color ColorInactive = Color.white;
 
         private void OnEnable()
         {
             MCPToolGroupConfig.InvalidateCache();
             _packageAllowlistText = string.Join(", ", MCPToolGroupConfig.PackageAllowlist);
             _packageAllowlistDirty = false;
+            _menuAllowlistText = string.Join(", ", MCPToolGroupConfig.MenuAllowlist);
+            _menuAllowlistDirty = false;
             EditorApplication.update += OnEditorUpdate;
         }
 
@@ -104,133 +105,165 @@ namespace UnityMCP.Groups
         private void OnGUI()
         {
             var groupRows = BuildGroupRows();
+            bool hasLiveState = MCPLiveStateReader.IsAvailable;
 
-            DrawHeader(groupRows);
-            GUILayout.Space(6);
+            _scroll = GUILayout.BeginScrollView(_scroll);
+            GUILayout.Space(4);
+            MCPGui.Header("Tool Groups", "Choose what AI clients can see and do in this project. Changes apply immediately.",
+                $"{MCPBridge.ConnectedServerCount} server(s) connected",
+                MCPBridge.ConnectedServerCount > 0 ? MCPGui.Good : MCPGui.Neutral,
+                "MCP servers (one per AI client session) currently connected to this Editor.");
+
+            DrawCounters(groupRows, hasLiveState);
+            DrawSafetyCard();
+            DrawAllowlistsCard();
 
             if (!MCPToolManifestReader.IsAvailable)
             {
                 EditorGUILayout.HelpBox(
-                    "Composite (Python) tool details and full group descriptions aren't available yet -- start " +
-                    "your AI client once (which starts the Python MCP server against this project) to populate " +
-                    "them. Only groups with at least one Unity-native tool are shown until then; a few groups " +
-                    "(e.g. behavior_tree, enemy_ai, weapons) are entirely composite and won't appear at all yet.",
+                    "Composite (Python) tools and full group descriptions appear after an AI client has started once " +
+                    "for this project. Until then only groups with Unity-native tools are listed.",
                     MessageType.Info);
                 GUILayout.Space(6);
             }
 
-            bool hasLiveState = MCPLiveStateReader.IsAvailable;
-            if (!hasLiveState)
-            {
-                EditorGUILayout.HelpBox(
-                    "No live session data yet -- \"Active\"/\"Inactive\" below reflects only the default for a " +
-                    "new session. Start an AI client and it'll switch to showing what's genuinely active right now.",
-                    MessageType.None);
-                GUILayout.Space(6);
-            }
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Groups", EditorStyles.boldLabel);
+            GUILayout.FlexibleSpace();
+            GUILayout.Label(new GUIContent(hasLiveState ? "showing live session state" : "showing defaults for new sessions",
+                hasLiveState
+                    ? "Active/inactive reflects what a running AI session has active right now."
+                    : "No AI session has reported yet: active/inactive is the default a new session starts with."), MCPGui.Muted, GUILayout.ExpandWidth(false));
+            if (GUILayout.Button(MCPGui.Button("Refresh", "Re-read the group settings from disk."), GUILayout.Width(70)))
+                MCPToolGroupConfig.InvalidateCache();
+            GUILayout.EndHorizontal();
+            GUILayout.Space(4);
 
-            _scroll = GUILayout.BeginScrollView(_scroll);
             foreach (var row in groupRows)
-            {
                 DrawGroup(row, hasLiveState);
-                GUILayout.Space(4);
-            }
+
             GUILayout.EndScrollView();
         }
 
-        private void DrawHeader(List<GroupRow> groupRows)
+        private void DrawSafetyCard()
         {
+            bool readOnly = MCPToolGroupConfig.IsReadOnlyMode();
+            bool danger = MCPToolGroupConfig.IsDangerTierEnabled();
+            MCPGui.BeginCard("Safety", danger ? MCPGui.Warn : readOnly ? MCPGui.Info : MCPGui.Good,
+                "Project-wide switches only a person in the Editor can change. AI clients can't.");
+
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Tool Groups", EditorStyles.boldLabel);
+            GUILayout.BeginVertical();
+            GUILayout.Label(new GUIContent("Read-Only Mode", "Look, don't touch."), EditorStyles.boldLabel);
+            GUILayout.Label("Refuses every tool that changes something (tools without the RO badge), for every AI client, immediately.", MCPGui.Muted);
+            GUILayout.EndVertical();
             GUILayout.FlexibleSpace();
-            GUILayout.Label($"Connected AI clients: {MCPServer.ConnectedClientCount}", EditorStyles.miniLabel);
-            if (GUILayout.Button("Refresh", GUILayout.Width(70)))
-            {
-                MCPToolGroupConfig.InvalidateCache();
-                Repaint();
-            }
+            bool newReadOnly = MCPGui.Switch(readOnly, "Turn Read-Only Mode on or off for this project.", MCPGui.Info);
             GUILayout.EndHorizontal();
+            if (newReadOnly != readOnly && (!newReadOnly || EditorUtility.DisplayDialog(
+                    "Enable Read-Only Mode",
+                    "Every tool call that isn't explicitly marked read-only will be refused for this entire project -- " +
+                    "for every connected AI client, immediately, including a session already in progress. You can turn " +
+                    "it back off here at any time.",
+                    "Enable", "Cancel")))
+                MCPToolGroupConfig.SetReadOnlyMode(newReadOnly);
 
-            DrawCounters(groupRows);
+            MCPGui.Separator();
 
-            GUILayout.Space(4);
-
-            bool readOnlyMode = MCPToolGroupConfig.IsReadOnlyMode();
-            var previousBg = GUI.backgroundColor;
-            GUI.backgroundColor = readOnlyMode ? ColorActive : previousBg;
-            GUILayout.BeginHorizontal(GUI.skin.box);
-            GUI.backgroundColor = previousBg;
-            GUILayout.Label("Read-Only Mode", EditorStyles.boldLabel, GUILayout.Width(120));
-            GUILayout.Label(
-                "Blocks every tool call that isn't explicitly marked read-only (tagged \"RO\" below) -- takes " +
-                "effect immediately, even mid-session.",
-                EditorStyles.wordWrappedMiniLabel);
+            GUILayout.BeginHorizontal();
+            GUILayout.BeginVertical();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(new GUIContent("Danger tier", "Actions that reach outside the scene and assets."), EditorStyles.boldLabel, GUILayout.ExpandWidth(false));
+            if (danger) MCPGui.Pill("approval required", MCPGui.Warn, "Each call waits for you in Window > Unity MCP > Approvals.");
+            GUILayout.EndHorizontal();
+            GUILayout.Label("Player builds, build and project settings, adding or removing packages, and menu items outside the " +
+                            "menu allowlist. Off: hidden or refused. On: each call still needs your approval.", MCPGui.Muted);
+            GUILayout.EndVertical();
             GUILayout.FlexibleSpace();
-            bool newReadOnlyMode = GUILayout.Toggle(readOnlyMode, readOnlyMode ? "On" : "Off", "Button", GUILayout.Width(50));
-            if (newReadOnlyMode != readOnlyMode)
-            {
-                if (!newReadOnlyMode || EditorUtility.DisplayDialog(
-                        "Enable Read-Only Mode",
-                        "Every tool call that isn't explicitly marked read-only will be refused for this entire " +
-                        "project -- for every connected AI client, immediately, including a session already in " +
-                        "progress. Use this when you want an AI to look around without being able to change " +
-                        "anything. You can turn it back off here at any time.",
-                        "Enable", "Cancel"))
-                {
-                    MCPToolGroupConfig.SetReadOnlyMode(newReadOnlyMode);
-                }
-            }
+            bool newDanger = MCPGui.Switch(danger, "Allow AI clients to request danger-tier actions (each still needs your approval).", MCPGui.Warn);
             GUILayout.EndHorizontal();
+            if (newDanger != danger && (!newDanger || EditorUtility.DisplayDialog(
+                    "Enable the danger tier",
+                    "AI clients will be able to REQUEST Player builds, build and project settings changes, package " +
+                    "installs/removals, and any Editor menu item. Nothing in this tier runs without your approval in the " +
+                    "MCP Approvals window. You can turn it back off here at any time.",
+                    "Enable", "Cancel")))
+                MCPToolGroupConfig.SetDangerTierEnabled(newDanger);
 
-            GUILayout.Space(4);
-            GUILayout.BeginHorizontal(GUI.skin.box);
-            GUILayout.Label("Package allowlist", EditorStyles.boldLabel, GUILayout.Width(120));
+            MCPGui.EndCard();
+        }
+
+        private void DrawAllowlistsCard()
+        {
+            MCPGui.BeginCard("Allowlists", MCPGui.Info, "Comma-separated lists. Click Apply to save an edit.");
+
+            GUILayout.Label(MCPGui.Label("Packages",
+                "Package IDs manage_packages may install, e.g. \"com.unity.cinemachine\", or \"com.unity.*\" for a prefix. " +
+                "Empty = any package (installs are still in the danger tier)."), EditorStyles.boldLabel);
+            GUILayout.BeginHorizontal();
             EditorGUI.BeginChangeCheck();
             _packageAllowlistText = EditorGUILayout.TextField(_packageAllowlistText);
             if (EditorGUI.EndChangeCheck()) _packageAllowlistDirty = true;
             GUI.enabled = _packageAllowlistDirty;
-            if (GUILayout.Button("Apply", GUILayout.Width(60)))
+            if (MCPGui.AccentButton(MCPGui.Button("Apply", "Save the package allowlist."), MCPGui.Good, GUILayout.Width(60)))
             {
-                var patterns = _packageAllowlistText.Split(',');
-                MCPToolGroupConfig.SetPackageAllowlist(patterns);
+                MCPToolGroupConfig.SetPackageAllowlist(_packageAllowlistText.Split(','));
                 _packageAllowlistText = string.Join(", ", MCPToolGroupConfig.PackageAllowlist);
                 _packageAllowlistDirty = false;
             }
             GUI.enabled = true;
             GUILayout.EndHorizontal();
-            EditorGUILayout.HelpBox(
-                "Comma-separated exact package IDs or \"prefix.*\" wildcards (e.g. \"com.unity.*, com.unitymcp.*\") " +
-                "that manage_packages(action:\"add\") is allowed to install. Empty means unrestricted -- today's " +
-                "default behavior.",
-                MessageType.None);
+            GUILayout.Label("Empty means any package. Example: com.unity.*, com.cysharp.unitask", MCPGui.Muted);
+
+            MCPGui.Separator();
+
+            GUILayout.Label(MCPGui.Label("Menu items",
+                "Menu paths execute_menu_item may run without the danger tier. An entry ending in \"/\" allows " +
+                "everything under it (\"GameObject/\"); others must match exactly (\"Edit/Play\")."), EditorStyles.boldLabel);
+            GUILayout.BeginHorizontal();
+            EditorGUI.BeginChangeCheck();
+            _menuAllowlistText = EditorGUILayout.TextField(_menuAllowlistText);
+            if (EditorGUI.EndChangeCheck()) _menuAllowlistDirty = true;
+            GUI.enabled = _menuAllowlistDirty;
+            if (MCPGui.AccentButton(MCPGui.Button("Apply", "Save the menu allowlist."), MCPGui.Good, GUILayout.Width(60)))
+            {
+                MCPToolGroupConfig.SetMenuAllowlist(_menuAllowlistText.Split(','));
+                _menuAllowlistText = string.Join(", ", MCPToolGroupConfig.MenuAllowlist);
+                _menuAllowlistDirty = false;
+            }
+            GUI.enabled = true;
+            if (GUILayout.Button(MCPGui.Button("Defaults", "Restore the built-in menu allowlist."), GUILayout.Width(70)))
+            {
+                MCPToolGroupConfig.SetMenuAllowlist(null);
+                _menuAllowlistText = string.Join(", ", MCPToolGroupConfig.MenuAllowlist);
+                _menuAllowlistDirty = false;
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Label("Ending in \"/\" allows everything under it; other entries must match exactly.", MCPGui.Muted);
+
+            MCPGui.EndCard();
         }
 
         /// <summary>
-        /// "Active" here means live-active if live_tool_state.json is available (a real AI
-        /// session actually has these active right now), falling back to default-active
-        /// otherwise -- the same fallback DrawGroup itself uses per row, kept consistent so
-        /// this summary line never contradicts the per-group badges below it.
+        /// "Active" means live-active when live_tool_state.json is available (a real AI session has
+        /// these active right now), else default-active, the same fallback DrawGroup uses per row, so
+        /// this summary never contradicts the per-group pills below it.
         /// </summary>
-        private void DrawCounters(List<GroupRow> groupRows)
+        private void DrawCounters(List<GroupRow> groupRows, bool hasLiveState)
         {
-            bool hasLiveState = MCPLiveStateReader.IsAvailable;
             var liveActive = MCPLiveStateReader.ActiveGroups;
 
             int totalGroups = groupRows.Count;
             int totalTools = groupRows.Sum(r => r.Tools.Count);
-
-            int activeGroups = 0;
-            int activeTools = 0;
+            int activeGroups = 0, activeTools = 0, disabledGroups = 0;
             foreach (var row in groupRows)
             {
                 bool isCore = row.Name == MCPToolGroupConfig.CoreGroup;
-                bool disabled = MCPToolGroupConfig.IsDisabled(row.Name);
-                if (disabled) continue;
+                if (MCPToolGroupConfig.IsDisabled(row.Name)) { disabledGroups++; continue; }
 
                 bool isActiveNow = isCore || (hasLiveState
                     ? liveActive.Contains(row.Name)
                     : MCPToolGroupConfig.DefaultActiveGroups.Contains(row.Name));
-
                 if (isActiveNow)
                 {
                     activeGroups++;
@@ -238,23 +271,24 @@ namespace UnityMCP.Groups
                 }
             }
 
-            GUILayout.BeginHorizontal(GUI.skin.box);
-            DrawCounterStat("Active groups", $"{activeGroups} / {totalGroups}");
-            DrawCounterStat("Active tools", $"{activeTools} / {totalTools}");
-            DrawCounterStat("Total groups", totalGroups.ToString());
-            DrawCounterStat("Total tools", totalTools.ToString());
-            GUILayout.FlexibleSpace();
-            GUILayout.Label(hasLiveState ? "(live)" : "(default only -- no live session yet)", EditorStyles.miniLabel);
+            GUILayout.BeginHorizontal();
+            DrawCounterStat($"{activeGroups} / {totalGroups}", "groups active", "Groups whose tools an AI client currently sees.");
+            DrawCounterStat($"{activeTools} / {totalTools}", "tools visible", "Tools in active groups. Hidden ones can still be found with search.");
+            DrawCounterStat(disabledGroups.ToString(), "groups disabled", "Disabled groups are invisible to AI clients entirely.");
             GUILayout.EndHorizontal();
+            GUILayout.Space(8);
         }
 
-        private void DrawCounterStat(string label, string value)
+        private static GUIStyle _statValue, _statLabel;
+
+        private void DrawCounterStat(string value, string label, string tooltip)
         {
-            GUILayout.BeginVertical(GUILayout.Width(90));
-            GUILayout.Label(value, EditorStyles.boldLabel);
-            GUILayout.Label(label, EditorStyles.miniLabel);
+            _statValue ??= new GUIStyle(EditorStyles.boldLabel) { fontSize = 15, alignment = TextAnchor.MiddleCenter };
+            _statLabel ??= new GUIStyle(MCPGui.Muted) { alignment = TextAnchor.MiddleCenter };
+            GUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.MinWidth(110));
+            GUILayout.Label(new GUIContent(value, tooltip), _statValue);
+            GUILayout.Label(new GUIContent(label, tooltip), _statLabel);
             GUILayout.EndVertical();
-            GUILayout.Space(8);
         }
 
         private List<GroupRow> BuildGroupRows()
@@ -392,99 +426,80 @@ namespace UnityMCP.Groups
             bool defaultActive = isCore || MCPToolGroupConfig.DefaultActiveGroups.Contains(row.Name);
             bool liveActive = isCore || MCPLiveStateReader.ActiveGroups.Contains(row.Name);
 
-            // Live state, when available, is the truth; default-active is only ever a
-            // fallback for "no session has told us anything yet" or a secondary hint.
+            // Live state, when available, is the truth; default-active is only a fallback.
             bool activeNow = hasLiveState ? liveActive : defaultActive;
 
-            var tint = disabled ? ColorDisabled : activeNow ? ColorActive : ColorInactive;
-            var previousBg = GUI.backgroundColor;
-            GUI.backgroundColor = tint;
-            GUILayout.BeginVertical(GUI.skin.box);
-            GUI.backgroundColor = previousBg;
+            string statusLabel, statusTip;
+            Color statusColor;
+            if (disabled) { statusLabel = "Disabled"; statusColor = MCPGui.Bad; statusTip = "Invisible to every AI client; calls fail as unknown."; }
+            else if (isCore) { statusLabel = "Always on"; statusColor = MCPGui.Good; statusTip = "The core group is always active."; }
+            else if (activeNow) { statusLabel = hasLiveState ? "Active" : "Active by default"; statusColor = MCPGui.Good; statusTip = hasLiveState ? "A running AI session has this group active." : "New AI sessions start with this group active."; }
+            else { statusLabel = hasLiveState ? "Inactive" : "Off by default"; statusColor = MCPGui.Neutral; statusTip = "Hidden until an AI activates it with manage_tools (or uses search/describe/call)."; }
+
+            MCPGui.BeginCard(row.Name, statusColor, row.Description);
 
             GUILayout.BeginHorizontal();
-
             if (!_expanded.TryGetValue(row.Name, out var isExpanded)) isExpanded = false;
-            var newExpanded = EditorGUILayout.Foldout(isExpanded, $"{row.Name}  ({row.Tools.Count} tool{(row.Tools.Count == 1 ? "" : "s")})", true);
+            var newExpanded = EditorGUILayout.Foldout(isExpanded,
+                new GUIContent($"{row.Tools.Count} tool{(row.Tools.Count == 1 ? "" : "s")}", "Show or hide this group's tools."), true);
             if (newExpanded != isExpanded) _expanded[row.Name] = newExpanded;
-
             GUILayout.FlexibleSpace();
-
-            string statusLabel;
-            if (disabled) statusLabel = "Disabled";
-            else if (isCore) statusLabel = "Always active";
-            else if (hasLiveState) statusLabel = liveActive ? "Active now" : "Inactive now";
-            else statusLabel = defaultActive ? "Active (default)" : "Inactive (default)";
-            GUILayout.Label(statusLabel, EditorStyles.miniBoldLabel, GUILayout.Width(130));
-
+            MCPGui.Pill(statusLabel, statusColor, statusTip, 96);
             GUILayout.EndHorizontal();
 
-            // Once there's live data, a group's default-for-new-sessions setting can
-            // legitimately differ from what's active right now (e.g. the AI activated it
-            // itself mid-session) -- surface that instead of hiding the discrepancy.
-            if (hasLiveState && !isCore && !disabled && liveActive != defaultActive)
-            {
-                GUILayout.Label($"(default for a new session: {(defaultActive ? "on" : "off")})", EditorStyles.miniLabel);
-            }
+            GUILayout.Label(row.Description, MCPGui.Muted);
 
-            GUILayout.Label(row.Description, EditorStyles.wordWrappedMiniLabel);
+            if (hasLiveState && !isCore && !disabled && liveActive != defaultActive)
+                GUILayout.Label($"Default for new sessions: {(defaultActive ? "on" : "off")}", MCPGui.Muted);
 
             if (!isCore)
             {
+                GUILayout.Space(2);
                 GUILayout.BeginHorizontal();
-
                 if (disabled)
                 {
-                    if (GUILayout.Button("Enable", GUILayout.Width(90)))
-                    {
+                    if (MCPGui.AccentButton(MCPGui.Button("Enable", "Make this group available to AI clients again."), MCPGui.Good, GUILayout.Width(110)))
                         MCPToolGroupConfig.SetDisabled(row.Name, false);
-                    }
                 }
                 else
                 {
-                    if (GUILayout.Button("Disable...", GUILayout.Width(90)))
-                    {
-                        if (EditorUtility.DisplayDialog(
-                                "Disable Tool Group",
-                                $"Disable '{row.Name}'? Its {row.Tools.Count} tool(s) will become completely " +
-                                "invisible to every connected AI client -- not just hidden, a direct call to any " +
-                                "of them will fail as if the tool never existed. This takes effect immediately, " +
-                                "even for an AI session already in progress. You can re-enable it here at any time.",
-                                "Disable", "Cancel"))
-                        {
-                            MCPToolGroupConfig.SetDisabled(row.Name, true);
-                        }
-                    }
-
-                    string activateLabel = defaultActive ? "Deactivate (default)" : "Activate (default)";
-                    if (GUILayout.Button(activateLabel, GUILayout.Width(140)))
-                    {
+                    if (GUILayout.Button(MCPGui.Button(defaultActive ? "Make default off" : "Make default on",
+                            "Sets whether NEW AI sessions start with this group active. Running sessions keep their own state."),
+                            GUILayout.Width(110)))
                         MCPToolGroupConfig.SetDefaultActive(row.Name, !defaultActive);
-                    }
-                }
 
+                    if (MCPGui.AccentButton(MCPGui.Button("Disable...", "Hide this group from every AI client completely, effective immediately."),
+                            MCPGui.Bad, GUILayout.Width(90)) &&
+                        EditorUtility.DisplayDialog(
+                            "Disable Tool Group",
+                            $"Disable '{row.Name}'? Its {row.Tools.Count} tool(s) will become completely invisible to every " +
+                            "connected AI client -- a direct call to any of them will fail as if the tool never existed. This " +
+                            "takes effect immediately, even for a session already in progress. You can re-enable it here at any time.",
+                            "Disable", "Cancel"))
+                        MCPToolGroupConfig.SetDisabled(row.Name, true);
+                }
                 GUILayout.FlexibleSpace();
                 GUILayout.EndHorizontal();
             }
 
             if (isExpanded)
             {
-                GUILayout.Space(4);
                 foreach (var tool in row.Tools)
                 {
+                    MCPGui.Separator();
                     GUILayout.BeginHorizontal();
-                    GUILayout.Label(tool.IsComposite ? "C" : "A", EditorStyles.miniLabel, GUILayout.Width(14));
-                    if (tool.IsReadOnly) GUILayout.Label("RO", EditorStyles.miniLabel, GUILayout.Width(20));
-                    GUILayout.BeginVertical();
-                    GUILayout.Label(tool.Name, EditorStyles.miniBoldLabel);
-                    GUILayout.Label(tool.Description, EditorStyles.wordWrappedMiniLabel);
-                    GUILayout.EndVertical();
+                    GUILayout.Label(tool.Name, EditorStyles.boldLabel, GUILayout.ExpandWidth(false));
+                    MCPGui.Pill(tool.IsComposite ? "composite" : "unity",
+                        tool.IsComposite ? MCPGui.Info : MCPGui.Neutral,
+                        tool.IsComposite ? "Python composite tool that chains other tools." : "Native tool running inside the Unity Editor.");
+                    if (tool.IsReadOnly) MCPGui.Pill("RO", MCPGui.Good, "Read-only: never changes the project, so it works in Read-Only Mode.");
+                    GUILayout.FlexibleSpace();
                     GUILayout.EndHorizontal();
-                    GUILayout.Space(2);
+                    GUILayout.Label(tool.Description, MCPGui.Muted);
                 }
             }
 
-            GUILayout.EndVertical();
+            MCPGui.EndCard();
         }
     }
 }

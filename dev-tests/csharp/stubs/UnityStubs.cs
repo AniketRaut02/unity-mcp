@@ -325,9 +325,8 @@ namespace UnityEditor
 
     // Minimal stand-in for real Unity's per-Editor-session key/value store, which
     // survives domain reloads (but not Editor restarts) -- exactly the property
-    // MCPServer relies on to remember "did a client have an authenticated
-    // connection open right before the last Stop()" across the domain reload that
-    // wipes every plain static field. A Dictionary is enough here since this stub
+    // the bridge relies on to keep its session token and answer cache across the
+    // domain reload that wipes every plain static field. A Dictionary is enough here since this stub
     // process never actually reloads a domain -- it just needs to hold whatever
     // was last set, the same way real SessionState would across a reload.
     public static class SessionState
@@ -339,6 +338,25 @@ namespace UnityEditor
 
         public static bool GetBool(string key, bool defaultValue) =>
             _bools.TryGetValue(key, out var value) ? value : defaultValue;
+
+        private static readonly System.Collections.Generic.Dictionary<string, string> _strings =
+            new System.Collections.Generic.Dictionary<string, string>();
+
+        public static void SetString(string key, string value) => _strings[key] = value;
+
+        public static string GetString(string key, string defaultValue) =>
+            _strings.TryGetValue(key, out var value) ? value : defaultValue;
+
+        public static void EraseString(string key) => _strings.Remove(key);
+    }
+
+    namespace PackageManager
+    {
+        public class PackageInfo
+        {
+            public string version = "2.0.0-stub";
+            public static PackageInfo FindForAssembly(System.Reflection.Assembly assembly) => new PackageInfo();
+        }
     }
 
     // Real Unity API (2021.1+) — see MCPHierarchyCache.cs for why this is used alongside

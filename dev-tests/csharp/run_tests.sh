@@ -28,13 +28,14 @@ mcs -target:exe -out:"$OUT" \
   "$UNITY_SRC/MCPToolRegistry.cs" \
   "$UNITY_SRC/MCPProjectUtil.cs" \
   "$UNITY_SRC/Security/MCPAuthHandshake.cs" \
-  "$UNITY_SRC/Security/MCPSessionFile.cs" \
-  "$UNITY_SRC/Security/MCPInstanceConflictDetector.cs" \
   "$UNITY_SRC/Security/MCPInstanceLock.cs" \
   "$UNITY_SRC/Security/MCPRateLimiter.cs" \
   "$UNITY_SRC/Security/MCPPathGuard.cs" \
   "$UNITY_SRC/Security/MCPAuditLog.cs" \
-  "$UNITY_SRC/MCPServer.cs" \
+  "$UNITY_SRC/MCPBridge.cs" \
+  "$UNITY_SRC/MCPConnection.cs" \
+  "$UNITY_SRC/MCPAnswerCache.cs" \
+  "$UNITY_SRC/Security/MCPUnityInfoFile.cs" \
   "$UNITY_SRC/MCPCommandDispatcher.cs" \
   "$UNITY_SRC/Tools/MCPSceneUtil.cs" \
   "$UNITY_SRC/Tools/MCPTypeResolver.cs" \
@@ -55,7 +56,8 @@ mcs -target:exe -out:"$OUT" \
   "$UNITY_SRC/Setup/MCPCodexTomlWriter.cs" \
   "$UNITY_SRC/Setup/MCPServerEntryBuilder.cs" \
   "$UNITY_SRC/Setup/MCPMcpConfigTargets.cs" \
-  "$UNITY_SRC/Setup/MCPPythonServerSettings.cs" \
+  "$UNITY_SRC/Setup/MCPAgentGuidance.cs" \
+  "$UNITY_SRC/Setup/MCPUvLocator.cs" \
   "$UNITY_SRC/Setup/MCPClientConfigTracker.cs" \
   "$UNITY_SRC/Setup/MCPSetupWindow.cs"
 

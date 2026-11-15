@@ -46,6 +46,14 @@ namespace UnityMCP.Groups
         /// docs/tool-scaling-strategy.md section 9's "secondary, lower-priority hardening".
         /// </summary>
         public List<string> packageAllowlist = new List<string>();
+
+        // Danger tier (Player builds, build/project settings, package add/remove, menu items
+        // outside menuAllowlist). Off by default; only a human in the Tool Groups window turns it on.
+        public bool dangerTierEnabled = false;
+
+        // execute_menu_item paths that work without the danger tier. null = the built-in
+        // defaults (MCPToolGroupConfig.DefaultMenuAllowlist); an edited list replaces them.
+        public List<string> menuAllowlist = null;
     }
 
     public static class MCPToolGroupConfig
@@ -92,6 +100,10 @@ namespace UnityMCP.Groups
             _cache = data;
             Directory.CreateDirectory(ConfigDir);
             File.WriteAllText(ConfigFilePath, JsonConvert.SerializeObject(data, Formatting.Indented));
+
+            // Unity pushes its tool list to the Python servers (protocol 2), so a group
+            // being disabled/enabled must be pushed again for clients to see it.
+            MCPBridge.RequestToolPush();
         }
 
         /// <summary>Invalidates the in-memory cache so the next read picks up any external edit (e.g. a hand-edited file) -- the window calls this on focus/refresh.</summary>
@@ -126,6 +138,47 @@ namespace UnityMCP.Groups
         }
 
         public static bool IsReadOnlyMode() => Load().readOnlyMode;
+
+        public static bool IsDangerTierEnabled() => Load().dangerTierEnabled;
+
+        public static void SetDangerTierEnabled(bool enabled)
+        {
+            var data = Load();
+            if (data.dangerTierEnabled == enabled) return;
+            data.dangerTierEnabled = enabled;
+            Save(data); // also re-pushes the tool list: danger-tier tools appear/disappear
+        }
+
+        /// <summary>Entries ending in "/" match any path under them; others match exactly.</summary>
+        public static readonly IReadOnlyList<string> DefaultMenuAllowlist = new[]
+        {
+            "GameObject/", "Component/", "Assets/Create/", "Window/",
+            "Edit/Play", "Edit/Pause", "Edit/Step", "Edit/Undo", "Edit/Redo", "Edit/Frame Selected"
+        };
+
+        public static IReadOnlyList<string> MenuAllowlist => Load().menuAllowlist ?? (IReadOnlyList<string>)DefaultMenuAllowlist;
+
+        public static bool IsMenuAllowed(string menuPath)
+        {
+            if (string.IsNullOrEmpty(menuPath)) return false;
+            foreach (var entry in MenuAllowlist)
+            {
+                if (string.IsNullOrEmpty(entry)) continue;
+                if (entry.EndsWith("/", StringComparison.Ordinal)
+                        ? menuPath.StartsWith(entry, StringComparison.Ordinal)
+                        : string.Equals(menuPath, entry, StringComparison.Ordinal))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>null (or "reset") restores the built-in defaults.</summary>
+        public static void SetMenuAllowlist(IEnumerable<string> entries)
+        {
+            var data = Load();
+            data.menuAllowlist = entries?.Select(e => e.Trim()).Where(e => e.Length > 0).Distinct().ToList();
+            Save(data);
+        }
 
         public static IReadOnlyList<string> PackageAllowlist => Load().packageAllowlist;
 

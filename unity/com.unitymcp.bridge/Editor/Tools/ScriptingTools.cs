@@ -115,11 +115,14 @@ namespace UnityMCP.Tools
         [MCPTool(
             "list_scripts",
             "Lists C# script paths (relative to Assets/) under an optional subfolder filter. Omit underPath to list every " +
-            "script in the project.",
+            "script in the project. Big results come back as a total, per-folder counts and the first 100 paths; page " +
+            "with offset/limit.",
             group: "scripting", readOnly: true)]
         public static MCPResult ListScripts(
             MCPToolContext ctx,
-            [MCPParam("Subfolder under Assets/ to search, e.g. 'Scripts/Enemies'. Omit to search the whole project.")] string underPath = null)
+            [MCPParam("Subfolder under Assets/ to search, e.g. 'Scripts/Enemies'. Omit to search the whole project.")] string underPath = null,
+            [MCPParam("Index of the first result to return, for paging. Defaults to 0.")] int offset = 0,
+            [MCPParam("Maximum results to return. Defaults to 100; 0 returns everything.")] int limit = MCPListPaging.DefaultLimit)
         {
             var projectRoot = MCPProjectUtil.ProjectRoot;
             var assetsRoot = Path.Combine(projectRoot, "Assets");
@@ -143,7 +146,7 @@ namespace UnityMCP.Tools
                 .OrderBy(p => p, StringComparer.Ordinal)
                 .ToList();
 
-            return MCPResult.Success(new { scripts });
+            return MCPResult.Success(MCPListPaging.Page(scripts, "scripts", offset, limit));
         }
 
         [MCPTool(

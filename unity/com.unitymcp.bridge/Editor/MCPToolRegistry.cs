@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using UnityEngine;
 using UnityMCP.Groups;
+using UnityMCP.Security;
 
 namespace UnityMCP
 {
@@ -14,6 +15,7 @@ namespace UnityMCP
         public MCPLatencyTier LatencyTier;
         public bool Destructive;
         public bool ReadOnly;
+        public bool Dangerous;
         public string Group;
         public MethodInfo Method;
         public ParameterInfo[] Parameters;
@@ -88,6 +90,7 @@ namespace UnityMCP
                             LatencyTier = attr.LatencyTier,
                             Destructive = attr.Destructive,
                             ReadOnly = attr.ReadOnly,
+                            Dangerous = attr.Dangerous,
                             Group = attr.Group,
                             Method = method,
                             Parameters = parameters,
@@ -231,6 +234,10 @@ namespace UnityMCP
             if (MCPToolGroupConfig.IsDisabled(entry.Group))
                 return MCPResult.Fail($"Unknown tool '{name}'.");
 
+            // Danger tier off (the default): hidden exactly like a disabled group.
+            if (entry.Dangerous && !MCPToolGroupConfig.IsDangerTierEnabled())
+                return MCPResult.Fail($"Unknown tool '{name}'.");
+
             // Read-Only Mode (Window > Unity MCP > Tool Groups, human-only toggle): unlike
             // a disabled group, this isn't about hiding a tool's existence -- it's a
             // deliberate "look but don't touch" posture, so the refusal says exactly why
@@ -247,6 +254,13 @@ namespace UnityMCP
                                       && Convert.ToBoolean(confirmRaw);
                     if (!confirmed)
                         return MCPResult.Fail($"Tool '{name}' is destructive and requires confirm=true.");
+                }
+
+                // Danger tier on: a human approves each call in the Editor first.
+                if (entry.Dangerous)
+                {
+                    var gate = MCPApprovalGate.Check(name, args);
+                    if (gate != null) return gate;
                 }
 
                 var callArgs = new object[entry.Parameters.Length];

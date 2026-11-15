@@ -1,0 +1,74 @@
+# Push a tag like v2.0.0 to release. See RELEASING.md for the one-time PyPI setup.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  SERVER_DIR: unity/com.unitymcp.bridge/Server~
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Tag must match the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(python3 -c "import json; print(json.load(open('unity/com.unitymcp.bridge/package.json'))['version'])")
+          if [ "$tag" != "$pkg" ]; then echo "Tag v$tag does not match package.json version $pkg"; exit 1; fi
+
+      - name: Run the server tests
+        working-directory: ${{ env.SERVER_DIR }}
+        run: |
+          uv sync --frozen
+          for f in tests/test_*.py; do
+            echo "== $f"
+            uv run --frozen python "$f" || exit 1
+          done
+
+  pypi:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted publishing: no stored PyPI token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Build
+        working-directory: ${{ env.SERVER_DIR }}
+        run: uv build --out-dir dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: ${{ env.SERVER_DIR }}/dist
+
+  github-release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the Claude Desktop bundle
+        run: |
+          npx -y @anthropic-ai/mcpb@2.1.2 validate "$SERVER_DIR/manifest.json"
+          npx -y @anthropic-ai/mcpb@2.1.2 pack "$SERVER_DIR" "unity-mcp-${GITHUB_REF_NAME}.mcpb"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "unity-mcp-${GITHUB_REF_NAME}.mcpb" \
+            --title "Unity MCP Bridge $GITHUB_REF_NAME" \
+            --notes "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/unity/com.unitymcp.bridge/CHANGELOG.md). Install: Window > Package Manager > + > Add package from git URL > https://github.com/${GITHUB_REPOSITORY}.git?path=/unity/com.unitymcp.bridge#${GITHUB_REF_NAME}"

@@ -1,0 +1,37 @@
+{
+  "manifest_version": "0.4",
+  "name": "darkpixel-unity-mcp",
+  "display_name": "Unity MCP Bridge",
+  "version": "2.0.0",
+  "description": "300+ tools inside a running Unity Editor: scenes, components, scripts, prefabs, lighting, UI, builds. Requires the Unity MCP Bridge package in your Unity project.",
+  "long_description": "Install the Unity package com.darkpixelgd.unitymcpbridge (same version as this bundle) in your Unity project, open the project in Unity, then point this extension at the project folder. The Editor connects to Claude automatically and survives script recompiles. Risky actions (Player builds, settings, package installs) stay off until you enable them in Unity, and each one then needs your approval in the Editor.",
+  "author": { "name": "DarkPixelGD" },
+  "homepage": "https://github.com/AniketRaut02/unity-mcp",
+  "license": "MIT",
+  "keywords": ["unity", "game development", "unity3d", "editor"],
+  "server": {
+    "type": "uv",
+    "entry_point": "unity_mcp_server/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--project", "${__dirname}", "--frozen", "python", "-m", "unity_mcp_server.server"],
+      "env": {
+        "UNITY_MCP_PROJECT_ROOT": "${user_config.unity_project}",
+        "UV_PROJECT_ENVIRONMENT": "${user_config.unity_project}/Library/MCP/.venv",
+        "PYTHONPATH": "${__dirname}"
+      }
+    }
+  },
+  "user_config": {
+    "unity_project": {
+      "type": "directory",
+      "title": "Unity project folder",
+      "description": "The Unity project to control: the folder that contains Assets/ and ProjectSettings/.",
+      "required": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "python": ">=3.11" }
+  }
+}

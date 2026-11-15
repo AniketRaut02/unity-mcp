@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Extracts the actual Behavior Tree framework C# content from
-python/unity_mcp_server/workflows.py and compiles it with mono's `mcs` against
+unity/com.unitymcp.bridge/Server~/unity_mcp_server/workflows.py and compiles it with mono's `mcs` against
 the same lightweight Unity API stubs the rest of dev-tests/csharp uses.
 
 This is checking the REAL embedded strings that scaffold_behavior_tree_framework
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "python"))
+sys.path.insert(0, str(REPO_ROOT / "unity" / "com.unitymcp.bridge" / "Server~"))
 
 from unity_mcp_server import workflows  # noqa: E402
 

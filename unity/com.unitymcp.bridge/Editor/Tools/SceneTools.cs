@@ -125,11 +125,13 @@ namespace UnityMCP.Tools
             return MCPResult.Success(new { path = MCPSceneUtil.GetPath(go) });
         }
 
-        [MCPTool("find_gameobjects", "Finds GameObjects in the active scene by exact name and/or tag. Omit both to list everything (use sparingly).", readOnly: true)]
+        [MCPTool("find_gameobjects", "Finds GameObjects in the active scene by exact name and/or tag. Omit both to list everything. Big results come back as a total, per-root-object counts and the first 100 paths; page with offset/limit.", readOnly: true)]
         public static MCPResult FindGameObjects(
             MCPToolContext ctx,
             [MCPParam("Exact GameObject name to match. Omit to match any name.")] string name = null,
-            [MCPParam("Unity tag to match, e.g. 'Player'. Omit to match any tag.")] string tag = null)
+            [MCPParam("Unity tag to match, e.g. 'Player'. Omit to match any tag.")] string tag = null,
+            [MCPParam("Index of the first result to return, for paging. Defaults to 0.")] int offset = 0,
+            [MCPParam("Maximum results to return. Defaults to 100; 0 returns everything.")] int limit = MCPListPaging.DefaultLimit)
         {
             GameObject[] candidates = !string.IsNullOrEmpty(tag)
                 ? GameObject.FindGameObjectsWithTag(tag)
@@ -142,7 +144,8 @@ namespace UnityMCP.Tools
                 matches.Add(MCPSceneUtil.GetPath(go));
             }
 
-            return MCPResult.Success(new { paths = matches });
+            matches.Sort(System.StringComparer.Ordinal); // stable pages: FindObjectsByType order is unspecified
+            return MCPResult.Success(MCPListPaging.Page(matches, "paths", offset, limit));
         }
 
         [MCPTool("rename_gameobject", "Renames a GameObject by hierarchy path.")]
